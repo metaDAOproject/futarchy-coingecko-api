@@ -190,15 +190,6 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
   }
 });
 
-// CoinGecko Endpoint 2: /historical_trades (Optional)
-app.get('/api/historical_trades', async (req: Request, res: Response) => {
-  res.json({
-    buy: [],
-    sell: [],
-    note: 'Historical trades require transaction monitoring - not yet implemented',
-  });
-});
-
 // Health check
 app.get('/health', (req: Request, res: Response) => {
   res.json({
@@ -216,7 +207,6 @@ app.get('/', (req: Request, res: Response) => {
     documentation: 'https://docs.coingecko.com/reference/exchanges-list',
     endpoints: {
       tickers: '/api/tickers - Returns all DAO tickers',
-      historical_trades: '/api/historical_trades?ticker_id={TICKER_ID}',
       health: '/health',
     },
     dex: {

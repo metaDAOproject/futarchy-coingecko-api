@@ -57,69 +57,6 @@ Returns all DAO tickers with pricing and volume information. Automatically disco
 curl https://your-api-domain.com/api/tickers
 ```
 
-## DEX Information
-
-### DEX Fork Type
-
-The Futarchy protocol uses a custom AMM implementation. You may refer to the [list of DEX Forks currently supported by GeckoTerminal](https://docs.geckoterminal.com/api-reference/dex-forks) for reference.
-
-**Supported DEX Fork Types:**
-- Algebra
-- Algebra Integral
-- Balancer V2
-- Balancer V3
-- Bluemove
-- Camelot V3
-- Cetus
-- Curve
-- Dedust
-- Ekubo
-- Iziswap
-- Jediswap
-- Kyberswap
-- Kyberswap Elastic
-- Liquidswap
-- Maverick V2
-- Orca
-- Quickswap V3
-- Raydum CLMM
-- Raydium
-- Solidly V2
-- Solidly V3
-- Sparrowswap
-- Ston.fi
-- Ston.fi V2
-- Surge Protocol
-- Traderjoe V2
-- Uniswap V2
-- Uniswap V3
-- Uniswap V4
-- Velocore V2
-
-**Note:** Futarchy uses a custom AMM implementation. Configure the fork type via the `DEX_FORK_TYPE` environment variable.
-
-### Factory Address
-
-**Configuration:** Set via `FACTORY_ADDRESS` environment variable
-
-The factory address for the Futarchy protocol program. This is the program ID that creates and manages DAO instances.
-
-**Example:**
-```env
-FACTORY_ADDRESS=YOUR_FACTORY_PROGRAM_ID
-```
-
-### Router Address
-
-**Configuration:** Set via `ROUTER_ADDRESS` environment variable
-
-The router address for executing swaps on the Futarchy protocol.
-
-**Example:**
-```env
-ROUTER_ADDRESS=YOUR_ROUTER_PROGRAM_ID
-```
-
 ## Installation
 
 ```bash
@@ -191,7 +128,6 @@ Get API information and available endpoints.
   "documentation": "https://docs.coingecko.com/reference/exchanges-list",
   "endpoints": {
     "tickers": "/api/tickers - Returns all DAO tickers",
-    "historical_trades": "/api/historical_trades?ticker_id={TICKER_ID}",
     "health": "/health"
   },
   "dex": {
@@ -200,22 +136,6 @@ Get API information and available endpoints.
     "router_address": "YOUR_ROUTER_PROGRAM_ID"
   },
   "note": "This API automatically discovers and aggregates all DAOs from the Futarchy protocol"
-}
-```
-
-### GET `/api/historical_trades`
-
-Returns historical trades (currently not implemented).
-
-**Query Parameters:**
-- `ticker_id` (optional): Format `{BASE_MINT}_{QUOTE_MINT}`
-
-**Response:**
-```json
-{
-  "buy": [],
-  "sell": [],
-  "note": "Historical trades require transaction monitoring - not yet implemented"
 }
 ```
 
@@ -305,4 +225,4 @@ src/
 
 ## License
 
-Private project
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
