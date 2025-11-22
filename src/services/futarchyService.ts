@@ -131,7 +131,7 @@ export class FutarchyService {
     const cached = this.getCached<PoolData>(cacheKey, config.cache.tickersTTL);
     if (cached) return cached;
 
-    let dao;
+    let dao: any;
     try {
       dao = await this.retryWithBackoff(() => this.client.getDao(daoPubkey));
     } catch (error: any) {
@@ -148,7 +148,7 @@ export class FutarchyService {
     // Check all possible pools: spot, and if futarchy, check all available pools
     const poolsToCheck: PoolState[] = [];
     
-    if (!dao.amm || !dao.amm.state) {
+    if (!dao?.amm || !dao?.amm?.state) {
       return null;
     }
     
@@ -328,7 +328,7 @@ export class FutarchyService {
 
     try {
       // Fetch all DAO accounts with retry logic
-      let daoAccounts;
+      let daoAccounts: any[];
       try {
         daoAccounts = await this.retryWithBackoff(() => this.client.autocrat.account.dao.all());
       } catch (error: any) {
