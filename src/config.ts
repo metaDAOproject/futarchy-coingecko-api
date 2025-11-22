@@ -28,7 +28,11 @@ export const config = {
   },
   cache: {
     tickersTTL: 10000, // 10 seconds
-    orderbookTTL: 5000, // 5 seconds
+  },
+  dex: {
+    forkType: process.env.DEX_FORK_TYPE || 'Custom',
+    factoryAddress: process.env.FACTORY_ADDRESS || '',
+    routerAddress: process.env.ROUTER_ADDRESS || '',
   },
   excludedDaos: (process.env.EXCLUDED_DAOS || '')
     .split(',')

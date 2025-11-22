@@ -2,7 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { FutarchyService } from './services/futarchyService.js';
 import { PriceService } from './services/priceService.js';
 import { config } from './config.js';
-import type { CoinGeckoTicker, CoinGeckoOrderbook } from './types/coingecko.js';
+import type { CoinGeckoTicker } from './types/coingecko.js';
 
 const app = express();
 
@@ -190,64 +190,7 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
   }
 });
 
-// CoinGecko Endpoint 2: /orderbook
-app.get('/api/orderbook', async (req: Request, res: Response) => {
-  try {
-    const { ticker_id, depth = '100' } = req.query;
-
-    if (!ticker_id) {
-      return res.status(400).json({ error: 'ticker_id parameter is required' });
-    }
-
-    // Parse ticker_id to extract base and quote mints
-    const [baseMintStr, quoteMintStr] = (ticker_id as string).split('_');
-    if (!baseMintStr || !quoteMintStr) {
-      return res.status(400).json({ error: 'Invalid ticker_id format. Expected: BASE_MINT_QUOTE_MINT' });
-    }
-
-    const futarchyService = getFutarchyService();
-    const priceService = getPriceService();
-    
-    // Find the DAO that matches this ticker_id
-    const allDaos = await futarchyService.getAllDaos();
-    const daoData = allDaos.find(
-      (dao) => 
-        dao.baseMint.toString() === baseMintStr && 
-        dao.quoteMint.toString() === quoteMintStr
-    );
-
-    if (!daoData) {
-      return res.status(404).json({ error: 'Ticker not found' });
-    }
-
-    const depthLevels = Math.min(parseInt(depth as string) / 2, 100);
-
-    const orderbookData = priceService.calculateOrderbookDepth(
-      daoData.poolData.baseReserves,
-      daoData.poolData.quoteReserves,
-      depthLevels,
-      daoData.baseDecimals
-    );
-
-    if (!orderbookData) {
-      return res.status(400).json({ error: 'Invalid pool data - cannot calculate orderbook' });
-    }
-
-    const orderbook: CoinGeckoOrderbook = {
-      ticker_id: ticker_id as string,
-      timestamp: Date.now().toString(),
-      bids: orderbookData.bids,
-      asks: orderbookData.asks,
-    };
-
-    res.json(orderbook);
-  } catch (error) {
-    console.error('Error in /api/orderbook:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// CoinGecko Endpoint 3: /historical_trades (Optional)
+// CoinGecko Endpoint 2: /historical_trades (Optional)
 app.get('/api/historical_trades', async (req: Request, res: Response) => {
   res.json({
     buy: [],
@@ -273,9 +216,13 @@ app.get('/', (req: Request, res: Response) => {
     documentation: 'https://docs.coingecko.com/reference/exchanges-list',
     endpoints: {
       tickers: '/api/tickers - Returns all DAO tickers',
-      orderbook: '/api/orderbook?ticker_id={BASE_MINT_QUOTE_MINT}&depth={DEPTH}',
       historical_trades: '/api/historical_trades?ticker_id={TICKER_ID}',
       health: '/health',
+    },
+    dex: {
+      fork_type: config.dex.forkType,
+      factory_address: config.dex.factoryAddress,
+      router_address: config.dex.routerAddress,
     },
     note: 'This API automatically discovers and aggregates all DAOs from the Futarchy protocol',
   });

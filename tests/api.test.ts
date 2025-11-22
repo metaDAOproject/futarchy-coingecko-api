@@ -58,10 +58,6 @@ const mockPriceService = {
       targetVolume: '2.00000000',
     };
   }),
-  calculateOrderbookDepth: jest.fn((baseReserves: BN, quoteReserves: BN, depthLevels: number, baseDecimals: number) => ({
-    bids: [['0.04975', '100.0']],
-    asks: [['0.05025', '100.0']],
-  })),
 } as unknown as PriceService;
 
 describe('CoinGecko API', () => {
@@ -111,52 +107,6 @@ describe('CoinGecko API', () => {
     it('should calculate volume from fees', async () => {
       await request(app).get('/api/tickers');
       expect(mockPriceService.calculateVolumeFromFees).toHaveBeenCalled();
-    });
-  });
-
-  describe('GET /api/orderbook', () => {
-    it('should return orderbook with valid ticker_id', async () => {
-      const tickerId = `${mockBaseMint.toString()}_${mockQuoteMint.toString()}`;
-      const response = await request(app)
-        .get('/api/orderbook')
-        .query({ ticker_id: tickerId });
-      expect(response.status).toBe(200);
-      expect(response.body).toHaveProperty('ticker_id', tickerId);
-      expect(response.body).toHaveProperty('timestamp');
-      expect(response.body).toHaveProperty('bids');
-      expect(response.body).toHaveProperty('asks');
-      expect(Array.isArray(response.body.bids)).toBe(true);
-      expect(Array.isArray(response.body.asks)).toBe(true);
-    });
-
-    it('should return 400 without ticker_id', async () => {
-      const response = await request(app).get('/api/orderbook');
-      expect(response.status).toBe(400);
-      expect(response.body).toHaveProperty('error');
-    });
-
-    it('should return 400 with invalid ticker_id format', async () => {
-      const response = await request(app)
-        .get('/api/orderbook')
-        .query({ ticker_id: 'INVALID' });
-      expect(response.status).toBe(400);
-      expect(response.body).toHaveProperty('error');
-    });
-
-    it('should return 404 for non-existent ticker', async () => {
-      const response = await request(app)
-        .get('/api/orderbook')
-        .query({ ticker_id: '11111111111111111111111111111111_22222222222222222222222222222222' });
-      expect(response.status).toBe(404);
-      expect(response.body).toHaveProperty('error');
-    });
-
-    it('should call getAllDaos to find the DAO', async () => {
-      const tickerId = `${mockBaseMint.toString()}_${mockQuoteMint.toString()}`;
-      await request(app)
-        .get('/api/orderbook')
-        .query({ ticker_id: tickerId });
-      expect(mockFutarchyService.getAllDaos).toHaveBeenCalled();
     });
   });
 

@@ -15,13 +15,6 @@ export interface CoinGeckoTicker {
   ask: string;
 }
 
-export interface CoinGeckoOrderbook {
-  ticker_id: string;
-  timestamp: string;
-  bids: [string, string][];
-  asks: [string, string][];
-}
-
 export interface CoinGeckoHistoricalTrade {
   trade_id: number;
   price: string;
