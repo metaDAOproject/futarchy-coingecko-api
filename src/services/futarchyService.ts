@@ -126,7 +126,10 @@ export class FutarchyService {
   }
 
   async getPoolData(daoAddress?: PublicKey): Promise<PoolData | null> {
-    const daoPubkey = daoAddress || config.dao.publicKey;
+    const daoPubkey = daoAddress;
+    if (!daoPubkey) {
+      throw new Error('DAO address is required. Provide daoAddress parameter or set DAO_PUBLIC_KEY environment variable.');
+    }
     const cacheKey = `pool_data_${daoPubkey.toString()}`;
     const cached = this.getCached<PoolData>(cacheKey, config.cache.tickersTTL);
     if (cached) return cached;
@@ -428,7 +431,10 @@ export class FutarchyService {
   }
 
   async getTotalLiquidity(daoAddress?: PublicKey): Promise<BN> {
-    const daoPubkey = daoAddress || config.dao.publicKey;
+    const daoPubkey = daoAddress;
+    if (!daoPubkey) {
+      throw new Error('DAO address is required. Provide daoAddress parameter or set DAO_PUBLIC_KEY environment variable.');
+    }
     const dao = await this.client.getDao(daoPubkey);
     return new BN(dao.amm.totalLiquidity);
   }

@@ -8,17 +8,6 @@ export const config = {
     rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
     wsUrl: process.env.SOLANA_WS_URL || 'wss://api.mainnet-beta.solana.com',
   },
-  dao: {
-    publicKey: new PublicKey(process.env.DAO_PUBLIC_KEY || ''),
-    baseMint: new PublicKey(process.env.BASE_MINT || ''),
-    quoteMint: new PublicKey(process.env.QUOTE_MINT || 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'),
-  },
-  tokens: {
-    baseDecimals: parseInt(process.env.BASE_DECIMALS || '9'),
-    quoteDecimals: parseInt(process.env.QUOTE_DECIMALS || '6'),
-    baseSymbol: process.env.BASE_SYMBOL || 'META',
-    quoteSymbol: process.env.QUOTE_SYMBOL || 'USDC',
-  },
   server: {
     port: parseInt(process.env.PORT || '3000'),
     rateLimit: {
