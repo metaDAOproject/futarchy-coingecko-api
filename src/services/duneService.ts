@@ -37,12 +37,22 @@ export class DuneService {
   private queryId?: number;
   private baseUrl: string = 'https://api.dune.com/api/v1';
   private cache: Map<string, { data: DunePoolMetrics | null; timestamp: number }>;
-  private cacheTTL: number = 60000; // 1 minute cache
+  private batchCache: Map<string, { data: Map<string, DunePoolMetrics>; timestamp: number }>;
+  private cacheTTL: number = 60000; // 1 minute cache for individual pools
+  private batchCacheTTL: number = 300000; // 5 minutes cache for batch queries (Dune queries are heavy)
 
   constructor() {
     this.apiKey = config.dune.apiKey;
     this.queryId = config.dune.queryId;
     this.cache = new Map();
+    this.batchCache = new Map();
+    // Allow configurable cache TTLs from environment
+    if (process.env.DUNE_CACHE_TTL) {
+      this.cacheTTL = parseInt(process.env.DUNE_CACHE_TTL) * 1000; // Convert seconds to milliseconds
+    }
+    if (process.env.DUNE_BATCH_CACHE_TTL) {
+      this.batchCacheTTL = parseInt(process.env.DUNE_BATCH_CACHE_TTL) * 1000; // Convert seconds to milliseconds
+    }
   }
 
   /**
@@ -560,6 +570,18 @@ ORDER BY base_volume_24h DESC;
       return new Map();
     }
 
+    // Create cache key based on token list (sorted for consistency)
+    const cacheKey = tokenAddresses && tokenAddresses.length > 0
+      ? `batch_metrics_${tokenAddresses.sort().join(',')}`
+      : 'batch_metrics_all';
+    
+    // Check batch cache
+    const cached = this.batchCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < this.batchCacheTTL) {
+      console.log(`[Dune] Using cached batch metrics (age: ${Math.round((Date.now() - cached.timestamp) / 1000)}s)`);
+      return new Map(cached.data); // Return a copy to prevent mutations
+    }
+
     try {
       // Build query parameters
       const parameters: Record<string, any> = {};
@@ -638,6 +660,10 @@ ORDER BY base_volume_24h DESC;
         }
       }
 
+      // Cache the batch results
+      this.batchCache.set(cacheKey, { data: metricsMap, timestamp: Date.now() });
+      console.log(`[Dune] Cached batch metrics for ${metricsMap.size} pools`);
+      
       return metricsMap;
     } catch (error: any) {
       console.error('[Dune] Error fetching Dune metrics for all pools:', error);
