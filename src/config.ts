@@ -32,4 +32,8 @@ export const config = {
     // Protocol fee rate (e.g., 0.0025 = 0.25%)
     protocolFeeRate: parseFloat(process.env.PROTOCOL_FEE_RATE || '0.0025'),
   },
+  dune: {
+    apiKey: process.env.DUNE_API_KEY || '',
+    queryId: process.env.DUNE_QUERY_ID ? parseInt(process.env.DUNE_QUERY_ID) : undefined,
+  },
 };

@@ -13,6 +13,8 @@ export interface CoinGeckoTicker {
   liquidity_in_usd: string;
   bid: string;
   ask: string;
+  high_24h?: string;
+  low_24h?: string;
 }
 
 export interface CoinGeckoHistoricalTrade {

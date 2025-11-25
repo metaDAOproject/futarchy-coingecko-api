@@ -1,6 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
 import { FutarchyService } from './services/futarchyService.js';
 import { PriceService } from './services/priceService.js';
+import { DuneService } from './services/duneService.js';
 import { config } from './config.js';
 import type { CoinGeckoTicker } from './types/coingecko.js';
 
@@ -10,6 +11,7 @@ const app = express();
 // This allows tests to mock services before they're accessed
 let futarchyServiceInstance: FutarchyService | null = null;
 let priceServiceInstance: PriceService | null = null;
+let duneServiceInstance: DuneService | null = null;
 
 function getFutarchyService(): FutarchyService {
   if (!futarchyServiceInstance) {
@@ -25,6 +27,14 @@ function getPriceService(): PriceService {
   return priceServiceInstance;
 }
 
+function getDuneService(): DuneService | null {
+  // Only require API key - queryId is optional since we can create temporary queries
+  if (!duneServiceInstance && config.dune.apiKey) {
+    duneServiceInstance = new DuneService();
+  }
+  return duneServiceInstance;
+}
+
 // Export for testing purposes
 export function setFutarchyService(service: FutarchyService | null): void {
   futarchyServiceInstance = service;
@@ -32,6 +42,10 @@ export function setFutarchyService(service: FutarchyService | null): void {
 
 export function setPriceService(service: PriceService | null): void {
   priceServiceInstance = service;
+}
+
+export function setDuneService(service: DuneService | null): void {
+  duneServiceInstance = service;
 }
 
 // Middleware
@@ -73,9 +87,66 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
   try {
     const futarchyService = getFutarchyService();
     const priceService = getPriceService();
+    const duneService = getDuneService();
     
     // Fetch all DAOs with their pool data
     const allDaos = await futarchyService.getAllDaos();
+    
+    // Collect baseMint addresses from all DAOs to pass to Dune query
+    const baseMintAddresses = allDaos.map(dao => dao.baseMint.toString());
+    
+    // Create a map from baseMint (token) to DAO address for lookup
+    const tokenToDaoMap = new Map<string, string>();
+    for (const dao of allDaos) {
+      tokenToDaoMap.set(dao.baseMint.toString().toLowerCase(), dao.daoAddress.toString().toLowerCase());
+    }
+    
+    // Fetch 24h metrics from Dune for all pools in batch (if Dune is configured)
+    // Note: Dune returns metrics keyed by token (baseMint), we need to map to DAO address
+    let duneMetricsMap = new Map<string, { base_volume_24h: string; target_volume_24h: string; high_24h: string; low_24h: string }>();
+    if (duneService) {
+      try {
+        console.log(`[Dune] Fetching metrics for ${baseMintAddresses.length} tokens:`, baseMintAddresses.slice(0, 5), baseMintAddresses.length > 5 ? '...' : '');
+        // Pass token addresses to filter the query
+        // Dune returns metrics keyed by token (baseMint), not DAO address
+        const allDuneMetrics = await duneService.getAllPoolsMetrics24h(baseMintAddresses);
+        console.log(`[Dune] Received ${allDuneMetrics.size} pool metrics from Dune`);
+        
+        if (allDuneMetrics.size > 0) {
+          console.log('[Dune] Token addresses found:', Array.from(allDuneMetrics.keys()).slice(0, 5));
+        } else {
+          console.warn('[Dune] No metrics returned from query - this could mean:');
+          console.warn('  - No transactions in the last 24 hours');
+          console.warn('  - Query returned no matching pools');
+          console.warn('  - Query execution failed silently');
+        }
+        
+        // Map from token (baseMint) to DAO address
+        for (const [tokenAddress, metrics] of allDuneMetrics.entries()) {
+          const daoAddress = tokenToDaoMap.get(tokenAddress.toLowerCase());
+          if (daoAddress) {
+            console.log(`[Dune] Mapping token ${tokenAddress} to DAO ${daoAddress}`);
+            duneMetricsMap.set(daoAddress, {
+              base_volume_24h: metrics.base_volume_24h,
+              target_volume_24h: metrics.target_volume_24h,
+              high_24h: metrics.high_24h,
+              low_24h: metrics.low_24h,
+            });
+          } else {
+            console.warn(`[Dune] No DAO found for token ${tokenAddress}`);
+          }
+        }
+      } catch (error: any) {
+        console.error('[Dune] Error fetching Dune metrics:', error);
+        console.error('[Dune] Error details:', error.message);
+        if (error.stack) {
+          console.error('[Dune] Stack trace:', error.stack);
+        }
+        // Continue without Dune data if it fails
+      }
+    } else {
+      console.warn('[Dune] Dune service not configured - set DUNE_API_KEY in environment');
+    }
     
     // Generate tickers for all DAOs
     const tickers: CoinGeckoTicker[] = [];
@@ -95,6 +166,7 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
           poolData 
         } = daoData;
         const tickerId = `${baseMint.toString()}_${quoteMint.toString()}`;
+        const poolId = daoAddress.toString();
         
         // Calculate price and metrics with validation
         const lastPrice = priceService.calculatePrice(
@@ -127,33 +199,58 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
           continue;
         }
 
-        // Calculate volumes from protocol fees
-        const volumeData = priceService.calculateVolumeFromFees(
-          poolData.baseProtocolFees,
-          poolData.quoteProtocolFees,
-          baseDecimals,
-          quoteDecimals,
-          config.fees.protocolFeeRate
-        );
-
-        // Fallback to estimated volume if fee-based calculation fails
+        // Get 24h metrics from Dune if available, otherwise fallback to fee-based calculation
+        const duneMetrics = duneMetricsMap.get(poolId.toLowerCase());
         let baseVolume: string;
         let targetVolume: string;
-        
-        if (volumeData) {
-          baseVolume = volumeData.baseVolume;
-          targetVolume = volumeData.targetVolume;
-        } else {
-          // Fallback: estimate volume from reserves (old method)
-          const baseReservesNum = poolData.baseReserves.toNumber();
-          const quoteReservesNum = poolData.quoteReserves.toNumber();
-          
-          if (!isFinite(baseReservesNum) || !isFinite(quoteReservesNum)) {
-            continue;
+        let high24h: string | undefined;
+        let low24h: string | undefined;
+
+        if (duneMetrics) {
+          // Use Dune data for base volume, high, and low
+          baseVolume = duneMetrics.base_volume_24h;
+          // Calculate target_volume from base_volume * last_price to ensure consistency
+          const baseVolumeNum = parseFloat(baseVolume);
+          const lastPriceNum = parseFloat(lastPrice);
+          if (isFinite(baseVolumeNum) && isFinite(lastPriceNum) && baseVolumeNum > 0 && lastPriceNum > 0) {
+            targetVolume = (baseVolumeNum * lastPriceNum).toFixed(12);
+          } else {
+            // Fallback to Dune's target_volume if calculation fails
+            targetVolume = duneMetrics.target_volume_24h;
           }
-          
-          baseVolume = (baseReservesNum * 0.01 / Math.pow(10, baseDecimals)).toFixed(8);
-          targetVolume = (quoteReservesNum * 0.01 / Math.pow(10, quoteDecimals)).toFixed(8);
+          high24h = duneMetrics.high_24h !== '0' ? duneMetrics.high_24h : undefined;
+          low24h = duneMetrics.low_24h !== '0' ? duneMetrics.low_24h : undefined;
+        } else {
+          // Only log once per request, not for every pool
+          if (tickers.length === 0 && duneService) {
+            console.log(`[Dune] No metrics found for pool ${poolId}, calculating volumes from protocol fees`);
+            console.log(`[Dune] Looking for pool_id: ${poolId.toLowerCase()}`);
+            console.log(`[Dune] Available pool IDs in map:`, Array.from(duneMetricsMap.keys()).slice(0, 10));
+          }
+          // Fallback: Calculate volumes from protocol fees
+          const volumeData = priceService.calculateVolumeFromFees(
+            poolData.baseProtocolFees,
+            poolData.quoteProtocolFees,
+            baseDecimals,
+            quoteDecimals,
+            config.fees.protocolFeeRate
+          );
+
+          if (volumeData) {
+            baseVolume = volumeData.baseVolume;
+            targetVolume = volumeData.targetVolume;
+          } else {
+            // Fallback: estimate volume from reserves (old method)
+            const baseReservesNum = poolData.baseReserves.toNumber();
+            const quoteReservesNum = poolData.quoteReserves.toNumber();
+            
+            if (!isFinite(baseReservesNum) || !isFinite(quoteReservesNum)) {
+              continue;
+            }
+            
+            baseVolume = (baseReservesNum * 0.01 / Math.pow(10, baseDecimals)).toFixed(8);
+            targetVolume = (quoteReservesNum * 0.01 / Math.pow(10, quoteDecimals)).toFixed(8);
+          }
         }
 
         // Final validation - ensure no NaN values
@@ -161,7 +258,7 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
           continue;
         }
 
-        tickers.push({
+        const ticker: CoinGeckoTicker = {
           ticker_id: tickerId,
           base_currency: baseMint.toString(),
           target_currency: quoteMint.toString(),
@@ -169,14 +266,24 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
           base_name: baseName,
           target_symbol: quoteSymbol,
           target_name: quoteName,
-          pool_id: daoAddress.toString(),
+          pool_id: poolId,
           last_price: lastPrice,
           base_volume: baseVolume,
           target_volume: targetVolume,
           liquidity_in_usd: liquidityUsd,
           bid: spread.bid,
           ask: spread.ask,
-        });
+        };
+
+        // Add high and low if available from Dune
+        if (high24h) {
+          ticker.high_24h = high24h;
+        }
+        if (low24h) {
+          ticker.low_24h = low24h;
+        }
+
+        tickers.push(ticker);
       } catch (error) {
         console.error(`Error generating ticker for DAO ${daoData.daoAddress.toString()}:`, error);
         // Continue processing other DAOs
@@ -197,6 +304,145 @@ app.get('/health', (req: Request, res: Response) => {
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
   });
+});
+
+// Manual Dune query execution endpoint
+app.post('/api/dune/execute', async (req: Request, res: Response) => {
+  try {
+    const duneService = getDuneService();
+    if (!duneService) {
+      return res.status(400).json({ error: 'Dune service not configured' });
+    }
+
+    const { queryId, parameters, tokenAddresses, sqlQuery } = req.body;
+    
+    let result: any;
+    
+    if (sqlQuery) {
+      // Execute raw SQL query
+      result = await duneService.executeRawQuery(sqlQuery, 'Manual Query');
+    } else if (tokenAddresses) {
+      // Execute generated query with token filter
+      result = await duneService.executeGeneratedQuery(tokenAddresses);
+    } else if (queryId) {
+      // Execute existing query by ID
+      result = await duneService.executeQueryManually(queryId, parameters);
+    } else {
+      return res.status(400).json({ 
+        error: 'Either queryId, tokenAddresses, or sqlQuery must be provided' 
+      });
+    }
+
+    res.json(result);
+  } catch (error: any) {
+    console.error('Error executing Dune query:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// Get generated SQL query endpoint
+app.get('/api/dune/query', (req: Request, res: Response) => {
+  try {
+    const duneService = getDuneService();
+    if (!duneService) {
+      return res.status(400).json({ error: 'Dune service not configured' });
+    }
+
+    const tokenAddresses = req.query.tokens 
+      ? (req.query.tokens as string).split(',').map(t => t.trim())
+      : undefined;
+
+    const sqlQuery = duneService.generate24hMetricsQuery(tokenAddresses);
+    
+    res.json({
+      sql: sqlQuery,
+      tokenAddresses: tokenAddresses || 'all',
+    });
+  } catch (error: any) {
+    console.error('Error generating query:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// Debug endpoint to test Dune query with current DAOs
+app.get('/api/dune/debug', async (req: Request, res: Response) => {
+  try {
+    const futarchyService = getFutarchyService();
+    const duneService = getDuneService();
+    
+    if (!duneService) {
+      return res.status(400).json({ error: 'Dune service not configured' });
+    }
+
+    // Fetch all DAOs
+    const allDaos = await futarchyService.getAllDaos();
+    const baseMintAddresses = allDaos.map(dao => dao.baseMint.toString());
+    const daoAddresses = allDaos.map(dao => dao.daoAddress.toString());
+
+    // Build parameters as the service does
+    const parameters: Record<string, any> = {};
+    if (baseMintAddresses && baseMintAddresses.length > 0) {
+      parameters.token_list = baseMintAddresses.join(',');
+    } else {
+      parameters.token_list = '';
+    }
+
+    // Try to execute with parameterized query
+    let executionResult: any = null;
+    let error: any = null;
+    let queryResults: any = null;
+    try {
+      if (config.dune.queryId) {
+        // Use parameterized query
+        const executeResult = await (duneService as any).executeQuery(config.dune.queryId, parameters);
+        console.log('[Debug] Execution ID:', executeResult.execution_id);
+        queryResults = await (duneService as any).getQueryResults(executeResult.execution_id);
+        executionResult = { 
+          execution_id: executeResult.execution_id, 
+          success: true,
+          rows: queryResults.rows,
+          metadata: queryResults.metadata,
+        };
+      }
+    } catch (e: any) {
+      error = {
+        message: e.message,
+        stack: e.stack,
+      };
+    }
+
+    res.json({
+      config: {
+        hasApiKey: !!config.dune.apiKey,
+        hasQueryId: !!config.dune.queryId,
+        queryId: config.dune.queryId,
+      },
+      daos: {
+        count: allDaos.length,
+        baseMintAddresses: baseMintAddresses.slice(0, 10),
+        daoAddresses: daoAddresses.slice(0, 10),
+      },
+      parameters: {
+        token_list: parameters.token_list,
+        token_list_length: parameters.token_list.length,
+        token_count: baseMintAddresses.length,
+        token_list_preview: parameters.token_list.substring(0, 200),
+      },
+      execution: error ? {
+        error,
+      } : {
+        success: true,
+        execution_id: executionResult?.execution_id,
+        rowsReturned: queryResults?.rows?.length || 0,
+        metadata: queryResults?.metadata || {},
+        sampleRows: queryResults?.rows?.slice(0, 3) || [],
+        allTokens: queryResults?.rows?.map((r: any) => r.token || r.pool_id) || [],
+      },
+    });
+  } catch (error: any) {
+    console.error('Error in debug endpoint:', error);
+    res.status(500).json({ error: error.message || 'Internal server error' });
+  }
 });
 
 // Root endpoint
