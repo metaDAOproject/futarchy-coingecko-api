@@ -15,6 +15,8 @@ export interface CoinGeckoTicker {
   ask: string;
   high_24h?: string;
   low_24h?: string;
+  treasury_usdc_aum?: string;
+  treasury_vault_address?: string;
 }
 
 export interface CoinGeckoHistoricalTrade {

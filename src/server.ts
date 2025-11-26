@@ -283,6 +283,14 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
           ticker.low_24h = low24h;
         }
 
+        // Add treasury USDC AUM and vault address if available
+        if (daoData.treasuryUsdcAum) {
+          ticker.treasury_usdc_aum = daoData.treasuryUsdcAum;
+        }
+        if (daoData.treasuryVaultAddress) {
+          ticker.treasury_vault_address = daoData.treasuryVaultAddress;
+        }
+
         tickers.push(ticker);
       } catch (error) {
         console.error(`Error generating ticker for DAO ${daoData.daoAddress.toString()}:`, error);

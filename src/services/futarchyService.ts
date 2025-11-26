@@ -1,7 +1,7 @@
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import { AnchorProvider, Wallet } from '@coral-xyz/anchor';
 import { FutarchyClient } from "@metadaoproject/futarchy/v0.6";
-import { getMint } from '@solana/spl-token';
+import { getMint, getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 import { config } from '../config.js';
 import BN from 'bn.js';
 
@@ -28,6 +28,8 @@ export interface DaoTickerData {
   quoteSymbol?: string;
   quoteName?: string;
   poolData: PoolData;
+  treasuryUsdcAum?: string;
+  treasuryVaultAddress?: string;
 }
 
 interface PoolState {
@@ -324,6 +326,44 @@ export class FutarchyService {
     }
   }
 
+  /**
+   * Get USDC balance for a given vault address (owner)
+   * USDC mint on Solana mainnet: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+   */
+  async getUsdcBalanceForVault(vaultAddress: PublicKey): Promise<string | null> {
+    const cacheKey = `usdc_balance_${vaultAddress.toString()}`;
+    const cached = this.getCached<string>(cacheKey, config.cache.tickersTTL);
+    if (cached !== null) return cached;
+
+    try {
+      // USDC mint address on Solana mainnet
+      const USDC_MINT = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+      
+      // Get the associated token account address for the vault
+      const tokenAccountAddress = await getAssociatedTokenAddress(
+        USDC_MINT,
+        vaultAddress,
+        true
+      );
+
+      // Get the token account
+      const tokenAccount = await this.retryWithBackoff(() => 
+        getAccount(this.connection, tokenAccountAddress)
+      );
+
+      // USDC has 6 decimals
+      const balance = tokenAccount.amount.toString();
+      const balanceFormatted = (Number(balance) / 1e6).toFixed(6);
+
+      this.setCache(cacheKey, balanceFormatted);
+      return balanceFormatted;
+    } catch (error: any) {
+      // If token account doesn't exist or other error, return null
+      // This is expected for vaults that don't have USDC
+      return null;
+    }
+  }
+
   async getAllDaos(): Promise<DaoTickerData[]> {
     const cacheKey = 'all_daos';
     const cached = this.getCached<DaoTickerData[]>(cacheKey, config.cache.tickersTTL);
@@ -396,6 +436,22 @@ export class FutarchyService {
             continue;
           }
           
+          // Get treasury USDC balance if squads_multisig_vault exists
+          let treasuryUsdcAum: string | undefined;
+          let treasuryVaultAddress: string | undefined;
+          
+          if (dao.squadsMultisigVault) {
+            try {
+              const vaultAddress = new PublicKey(dao.squadsMultisigVault);
+              treasuryVaultAddress = vaultAddress.toString();
+              const usdcBalance = await this.getUsdcBalanceForVault(vaultAddress);
+              treasuryUsdcAum = usdcBalance || undefined;
+            } catch (error: any) {
+              // If vault address is invalid or balance can't be fetched, continue without it
+              console.warn(`Could not fetch USDC balance for vault ${dao.squads_multisig_vault} for DAO ${daoAddress.toString()}:`, error.message);
+            }
+          }
+          
           validDaoData.push({
             daoAddress,
             baseMint,
@@ -407,6 +463,8 @@ export class FutarchyService {
             quoteSymbol: quoteMetadata?.symbol,
             quoteName: quoteMetadata?.name,
             poolData,
+            treasuryUsdcAum,
+            treasuryVaultAddress,
           });
         } catch (error: any) {
           const isRateLimited = this.isRateLimitError(error);
