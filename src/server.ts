@@ -2,6 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { FutarchyService } from './services/futarchyService.js';
 import { PriceService } from './services/priceService.js';
 import { DuneService } from './services/duneService.js';
+import { SolanaService } from './services/solanaService.js';
 import { config } from './config.js';
 import type { CoinGeckoTicker } from './types/coingecko.js';
 
@@ -12,6 +13,7 @@ const app = express();
 let futarchyServiceInstance: FutarchyService | null = null;
 let priceServiceInstance: PriceService | null = null;
 let duneServiceInstance: DuneService | null = null;
+let solanaServiceInstance: SolanaService | null = null;
 
 function getFutarchyService(): FutarchyService {
   if (!futarchyServiceInstance) {
@@ -35,6 +37,13 @@ function getDuneService(): DuneService | null {
   return duneServiceInstance;
 }
 
+function getSolanaService(): SolanaService {
+  if (!solanaServiceInstance) {
+    solanaServiceInstance = new SolanaService();
+  }
+  return solanaServiceInstance;
+}
+
 // Export for testing purposes
 export function setFutarchyService(service: FutarchyService | null): void {
   futarchyServiceInstance = service;
@@ -46,6 +55,10 @@ export function setPriceService(service: PriceService | null): void {
 
 export function setDuneService(service: DuneService | null): void {
   duneServiceInstance = service;
+}
+
+export function setSolanaService(service: SolanaService | null): void {
+  solanaServiceInstance = service;
 }
 
 // Middleware
@@ -314,6 +327,90 @@ app.get('/health', (req: Request, res: Response) => {
   });
 });
 
+// Token Supply Endpoints
+
+// Get complete supply info for a token
+app.get('/api/supply/:mintAddress', async (req: Request, res: Response) => {
+  try {
+    const mintAddress = req.params.mintAddress;
+    const solanaService = getSolanaService();
+
+    if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
+      return res.status(400).json({
+        error: 'Invalid mint address',
+        message: 'The provided address is not a valid Solana public key',
+      });
+    }
+
+    const supplyInfo = await solanaService.getSupplyInfo(mintAddress);
+
+    res.json({
+      result: supplyInfo.totalSupply,
+      data: supplyInfo,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/supply/:mintAddress:', error);
+    res.status(500).json({
+      error: 'Failed to fetch supply info',
+      message: error.message || 'Internal server error',
+    });
+  }
+});
+
+// Get total supply for a token
+app.get('/api/supply/:mintAddress/total', async (req: Request, res: Response) => {
+  try {
+    const mintAddress = req.params.mintAddress;
+    const solanaService = getSolanaService();
+
+    if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
+      return res.status(400).json({
+        error: 'Invalid mint address',
+        message: 'The provided address is not a valid Solana public key',
+      });
+    }
+
+    const totalSupply = await solanaService.getTotalSupply(mintAddress);
+
+    res.json({
+      result: totalSupply,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/supply/:mintAddress/total:', error);
+    res.status(500).json({
+      error: 'Failed to fetch total supply',
+      message: error.message || 'Internal server error',
+    });
+  }
+});
+
+// Get circulating supply for a token
+app.get('/api/supply/:mintAddress/circulating', async (req: Request, res: Response) => {
+  try {
+    const mintAddress = req.params.mintAddress;
+    const solanaService = getSolanaService();
+
+    if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
+      return res.status(400).json({
+        error: 'Invalid mint address',
+        message: 'The provided address is not a valid Solana public key',
+      });
+    }
+
+    const circulatingSupply = await solanaService.getCirculatingSupply(mintAddress);
+
+    res.json({
+      result: circulatingSupply,
+    });
+  } catch (error: any) {
+    console.error('Error in /api/supply/:mintAddress/circulating:', error);
+    res.status(500).json({
+      error: 'Failed to fetch circulating supply',
+      message: error.message || 'Internal server error',
+    });
+  }
+});
+
 // Manual Dune query execution endpoint
 app.post('/api/dune/execute', async (req: Request, res: Response) => {
   try {
@@ -461,6 +558,9 @@ app.get('/', (req: Request, res: Response) => {
     documentation: 'https://docs.coingecko.com/reference/exchanges-list',
     endpoints: {
       tickers: '/api/tickers - Returns all DAO tickers',
+      supply: '/api/supply/:mintAddress - Returns supply info for any token',
+      supply_total: '/api/supply/:mintAddress/total - Returns total supply',
+      supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply',
       health: '/health',
     },
     dex: {
