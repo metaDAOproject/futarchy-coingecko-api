@@ -98,32 +98,58 @@ export class DuneService {
   }
 
   /**
-   * Convert scientific notation string to regular decimal notation
-   * @param value String value that may be in scientific notation (e.g., "3.2259955052399996E5")
+   * Convert scientific notation to regular decimal notation
+   * Handles string, number, and other types from Dune API
+   * @param value Value that may be in scientific notation (e.g., "3.2259955052399996E5" or 322599.55)
    * @returns String in regular decimal notation (e.g., "322599.55052399996")
    */
-  private convertScientificNotation(value: string | null | undefined): string {
-    if (!value || value === '0' || value === '') {
+  private convertScientificNotation(value: unknown): string {
+    // Handle null, undefined, empty values
+    if (value === null || value === undefined || value === '' || value === 0 || value === '0') {
       return '0';
     }
     
-    // Check if the value contains scientific notation (E or e)
-    if (value.includes('E') || value.includes('e')) {
-      try {
-        // Parse as number and convert back to string without scientific notation
-        const num = parseFloat(value);
-        if (isNaN(num)) {
-          return '0';
-        }
-        // Use toFixed with enough precision, then remove trailing zeros
-        return num.toFixed(20).replace(/\.?0+$/, '');
-      } catch (error) {
-        console.warn(`[Dune] Failed to convert scientific notation: ${value}`, error);
-        return value;
+    // Handle number type directly
+    if (typeof value === 'number') {
+      if (isNaN(value) || !isFinite(value)) {
+        return '0';
       }
+      // Use toFixed with enough precision, then remove trailing zeros
+      return value.toFixed(20).replace(/\.?0+$/, '');
     }
     
-    return value;
+    // Handle string type
+    if (typeof value === 'string') {
+      // Check if it contains scientific notation (E or e)
+      if (value.includes('E') || value.includes('e')) {
+        try {
+          const num = parseFloat(value);
+          if (isNaN(num)) {
+            return '0';
+          }
+          return num.toFixed(20).replace(/\.?0+$/, '');
+        } catch (error) {
+          console.warn(`[Dune] Failed to convert scientific notation: ${value}`, error);
+          return value;
+        }
+      }
+      return value;
+    }
+    
+    // Handle any other type (object, boolean, etc.) - convert to string first
+    try {
+      const strValue = String(value);
+      if (strValue === '[object Object]' || strValue === 'undefined' || strValue === 'null') {
+        return '0';
+      }
+      const num = parseFloat(strValue);
+      if (isNaN(num) || !isFinite(num)) {
+        return '0';
+      }
+      return num.toFixed(20).replace(/\.?0+$/, '');
+    } catch {
+      return '0';
+    }
   }
 
   /**
@@ -781,9 +807,7 @@ ORDER BY base_volume_24h DESC;
 
     try {
       // Build query parameters
-      const parameters: Record<string, any> = {
-        since_start: sinceStart.toString(),
-      };
+      const parameters: Record<string, any> = {};
       
       if (tokenAddresses && tokenAddresses.length > 0) {
         // Format tokens with single quotes around each token, comma-separated
@@ -926,4 +950,5 @@ ORDER BY base_volume_24h DESC;
     return this.aggregateVolumeQueryId;
   }
 }
+
 
