@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import { config } from '../config.js';
+import BN from 'bn.js';
 
 export interface TokenSupplyInfo {
   mint: string;
@@ -8,6 +9,47 @@ export interface TokenSupplyInfo {
   circulatingSupply: string;
   decimals: number;
   rawTotalSupply: string;
+  // Detailed breakdown of non-circulating tokens
+  allocation?: {
+    // Team performance package (locked tokens)
+    teamPerformancePackage?: {
+      amount: string;
+      address?: string;
+    };
+    // FutarchyAMM liquidity (internal AMM for spot trading)
+    futarchyAmmLiquidity?: {
+      amount: string;
+      vaultAddress?: string;
+    };
+    // Meteora LP position (external DEX liquidity)
+    meteoraLpLiquidity?: {
+      amount: string;
+      poolAddress?: string;
+      vaultAddress?: string;
+    };
+    // DAO address
+    daoAddress?: string;
+    // Launch address
+    launchAddress?: string;
+  };
+}
+
+export interface TokenAllocationInput {
+  teamPerformancePackage: {
+    amount: BN;
+    address?: string;
+  };
+  futarchyAmmLiquidity: {
+    amount: BN;
+    vaultAddress?: string;
+  };
+  meteoraLpLiquidity: {
+    amount: BN;
+    poolAddress?: string;
+    vaultAddress?: string;
+  };
+  daoAddress?: string;
+  launchAddress?: string;
 }
 
 export class SolanaService {
@@ -72,30 +114,34 @@ export class SolanaService {
 
   /**
    * Get the circulating supply of a token
-   * For now, this returns the same as total supply since we don't have
-   * information about locked/vested tokens. This can be extended to
-   * subtract known locked addresses.
+   * Circulating supply = Total supply - Locked amounts (performance packages, etc.)
    * 
    * @param mintAddress - The mint address of the token
-   * @param excludeAddresses - Optional array of addresses to exclude from circulating supply
+   * @param lockedAmount - Optional BN of locked tokens to subtract (e.g., performance package)
    * @returns Promise<string> - The circulating supply with proper decimals
    */
-  async getCirculatingSupply(mintAddress: string, excludeAddresses?: string[]): Promise<string> {
-    const cacheKey = `circulating_supply_${mintAddress}_${excludeAddresses?.join(',') || 'none'}`;
+  async getCirculatingSupply(mintAddress: string, lockedAmount?: BN): Promise<string> {
+    const lockedKey = lockedAmount ? lockedAmount.toString() : 'none';
+    const cacheKey = `circulating_supply_${mintAddress}_${lockedKey}`;
     const cached = this.getCached<string>(cacheKey, config.cache.tickersTTL);
     if (cached !== null) return cached;
 
     try {
       const mintPubkey = new PublicKey(mintAddress);
       const mintInfo = await getMint(this.connection, mintPubkey);
-      let supply = Number(mintInfo.supply);
+      let supply = new BN(mintInfo.supply.toString());
       const decimals = mintInfo.decimals;
 
-      // If exclude addresses are provided, we would subtract their balances
-      // This is a placeholder for future implementation
-      // For now, circulating = total (conservative approach)
+      // Subtract locked amounts (performance package tokens, etc.)
+      if (lockedAmount && lockedAmount.gt(new BN(0))) {
+        supply = supply.sub(lockedAmount);
+        // Ensure we don't go negative
+        if (supply.isNeg()) {
+          supply = new BN(0);
+        }
+      }
 
-      const circulatingSupply = supply / Math.pow(10, decimals);
+      const circulatingSupply = Number(supply.toString()) / Math.pow(10, decimals);
       const result = circulatingSupply.toString();
 
       this.setCache(cacheKey, result);
@@ -107,12 +153,15 @@ export class SolanaService {
   }
 
   /**
-   * Get complete supply information for a token
+   * Get complete supply information for a token with detailed allocation breakdown
    * @param mintAddress - The mint address of the token
-   * @returns Promise<TokenSupplyInfo> - Complete supply information
+   * @param allocation - Optional token allocation breakdown (team, futarchyAMM, meteora)
+   * @returns Promise<TokenSupplyInfo> - Complete supply information with allocation details
    */
-  async getSupplyInfo(mintAddress: string): Promise<TokenSupplyInfo> {
-    const cacheKey = `supply_info_${mintAddress}`;
+  async getSupplyInfo(mintAddress: string, allocation?: TokenAllocationInput): Promise<TokenSupplyInfo> {
+    const cacheKey = allocation 
+      ? `supply_info_${mintAddress}_${allocation.teamPerformancePackage.amount}_${allocation.futarchyAmmLiquidity.amount}_${allocation.meteoraLpLiquidity.amount}`
+      : `supply_info_${mintAddress}_none`;
     const cached = this.getCached<TokenSupplyInfo>(cacheKey, config.cache.tickersTTL);
     if (cached !== null) return cached;
 
@@ -120,17 +169,61 @@ export class SolanaService {
       const mintPubkey = new PublicKey(mintAddress);
       const mintInfo = await getMint(this.connection, mintPubkey);
       const rawSupply = mintInfo.supply.toString();
-      const supply = Number(mintInfo.supply);
+      const totalSupplyBN = new BN(mintInfo.supply.toString());
       const decimals = mintInfo.decimals;
+      const divisor = Math.pow(10, decimals);
 
-      const supplyWithDecimals = supply / Math.pow(10, decimals);
+      const totalSupplyWithDecimals = Number(totalSupplyBN.toString()) / divisor;
+
+      // Calculate circulating supply by subtracting all non-circulating allocations
+      let circulatingSupplyBN = totalSupplyBN;
+      let allocationDetails: TokenSupplyInfo['allocation'] | undefined;
+
+      if (allocation) {
+        const teamAmount = allocation.teamPerformancePackage.amount;
+        const futarchyAmount = allocation.futarchyAmmLiquidity.amount;
+        const meteoraAmount = allocation.meteoraLpLiquidity.amount;
+
+        // Only subtract team performance package from circulating supply
+        // Liquidity (futarchyAMM and meteora) IS considered circulating
+        if (teamAmount.gt(new BN(0))) {
+          circulatingSupplyBN = circulatingSupplyBN.sub(teamAmount);
+        }
+
+        // Ensure we don't go negative
+        if (circulatingSupplyBN.isNeg()) {
+          circulatingSupplyBN = new BN(0);
+        }
+
+        // Build allocation details for response (include all for transparency)
+        allocationDetails = {
+          teamPerformancePackage: teamAmount.gt(new BN(0)) ? {
+            amount: (Number(teamAmount.toString()) / divisor).toString(),
+            address: allocation.teamPerformancePackage.address,
+          } : undefined,
+          futarchyAmmLiquidity: futarchyAmount.gt(new BN(0)) ? {
+            amount: (Number(futarchyAmount.toString()) / divisor).toString(),
+            vaultAddress: allocation.futarchyAmmLiquidity.vaultAddress,
+          } : undefined,
+          meteoraLpLiquidity: meteoraAmount.gt(new BN(0)) ? {
+            amount: (Number(meteoraAmount.toString()) / divisor).toString(),
+            poolAddress: allocation.meteoraLpLiquidity.poolAddress,
+            vaultAddress: allocation.meteoraLpLiquidity.vaultAddress,
+          } : undefined,
+          daoAddress: allocation.daoAddress,
+          launchAddress: allocation.launchAddress,
+        };
+      }
+      
+      const circulatingSupplyWithDecimals = Number(circulatingSupplyBN.toString()) / divisor;
 
       const result: TokenSupplyInfo = {
         mint: mintAddress,
-        totalSupply: supplyWithDecimals.toString(),
-        circulatingSupply: supplyWithDecimals.toString(), // Same for now
+        totalSupply: totalSupplyWithDecimals.toString(),
+        circulatingSupply: circulatingSupplyWithDecimals.toString(),
         decimals,
         rawTotalSupply: rawSupply,
+        allocation: allocationDetails,
       };
 
       this.setCache(cacheKey, result);

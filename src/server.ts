@@ -3,8 +3,11 @@ import { FutarchyService } from './services/futarchyService.js';
 import { PriceService } from './services/priceService.js';
 import { DuneService } from './services/duneService.js';
 import { SolanaService } from './services/solanaService.js';
+import { LaunchpadService } from './services/launchpadService.js';
 import { config } from './config.js';
 import type { CoinGeckoTicker } from './types/coingecko.js';
+import { PublicKey } from '@solana/web3.js';
+import BN from 'bn.js';
 
 const app = express();
 
@@ -14,6 +17,7 @@ let futarchyServiceInstance: FutarchyService | null = null;
 let priceServiceInstance: PriceService | null = null;
 let duneServiceInstance: DuneService | null = null;
 let solanaServiceInstance: SolanaService | null = null;
+let launchpadServiceInstance: LaunchpadService | null = null;
 
 function getFutarchyService(): FutarchyService {
   if (!futarchyServiceInstance) {
@@ -44,6 +48,13 @@ function getSolanaService(): SolanaService {
   return solanaServiceInstance;
 }
 
+function getLaunchpadService(): LaunchpadService {
+  if (!launchpadServiceInstance) {
+    launchpadServiceInstance = new LaunchpadService();
+  }
+  return launchpadServiceInstance;
+}
+
 // Export for testing purposes
 export function setFutarchyService(service: FutarchyService | null): void {
   futarchyServiceInstance = service;
@@ -59,6 +70,10 @@ export function setDuneService(service: DuneService | null): void {
 
 export function setSolanaService(service: SolanaService | null): void {
   solanaServiceInstance = service;
+}
+
+export function setLaunchpadService(service: LaunchpadService | null): void {
+  launchpadServiceInstance = service;
 }
 
 // Middleware
@@ -334,6 +349,7 @@ app.get('/api/supply/:mintAddress', async (req: Request, res: Response) => {
   try {
     const mintAddress = req.params.mintAddress;
     const solanaService = getSolanaService();
+    const launchpadService = getLaunchpadService();
 
     if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
       return res.status(400).json({
@@ -342,7 +358,28 @@ app.get('/api/supply/:mintAddress', async (req: Request, res: Response) => {
       });
     }
 
-    const supplyInfo = await solanaService.getSupplyInfo(mintAddress);
+    // Get complete token allocation breakdown (team, futarchyAMM, meteora)
+    const allocation = await launchpadService.getTokenAllocationBreakdown(
+      new PublicKey(mintAddress)
+    );
+
+    const supplyInfo = await solanaService.getSupplyInfo(mintAddress, {
+      teamPerformancePackage: {
+        amount: allocation.teamPerformancePackage.amount,
+        address: allocation.teamPerformancePackage.address?.toString(),
+      },
+      futarchyAmmLiquidity: {
+        amount: allocation.futarchyAmmLiquidity.amount,
+        vaultAddress: allocation.futarchyAmmLiquidity.vaultAddress?.toString(),
+      },
+      meteoraLpLiquidity: {
+        amount: allocation.meteoraLpLiquidity.amount,
+        poolAddress: allocation.meteoraLpLiquidity.poolAddress?.toString(),
+        vaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
+      },
+      daoAddress: allocation.daoAddress?.toString(),
+      launchAddress: allocation.launchAddress?.toString(),
+    });
 
     res.json({
       result: supplyInfo.totalSupply,
@@ -389,6 +426,7 @@ app.get('/api/supply/:mintAddress/circulating', async (req: Request, res: Respon
   try {
     const mintAddress = req.params.mintAddress;
     const solanaService = getSolanaService();
+    const launchpadService = getLaunchpadService();
 
     if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
       return res.status(400).json({
@@ -397,11 +435,47 @@ app.get('/api/supply/:mintAddress/circulating', async (req: Request, res: Respon
       });
     }
 
-    const circulatingSupply = await solanaService.getCirculatingSupply(mintAddress);
+    // Get complete token allocation breakdown
+    const allocation = await launchpadService.getTokenAllocationBreakdown(
+      new PublicKey(mintAddress)
+    );
 
-    res.json({
+    // Only team performance package is excluded from circulating supply
+    // Liquidity (futarchyAMM and meteora) IS considered circulating
+    const lockedAmount = allocation.teamPerformancePackage.amount;
+
+    const circulatingSupply = await solanaService.getCirculatingSupply(mintAddress, lockedAmount);
+
+    // Include allocation addresses in response
+    const response: { 
+      result: string; 
+      allocation?: {
+        teamPerformancePackageAddress?: string;
+        futarchyAmmVaultAddress?: string;
+        meteoraPoolAddress?: string;
+        meteoraVaultAddress?: string;
+        daoAddress?: string;
+        launchAddress?: string;
+      };
+    } = {
       result: circulatingSupply,
-    });
+    };
+    
+    // Add allocation details if any are present
+    if (allocation.teamPerformancePackage.address || 
+        allocation.futarchyAmmLiquidity.vaultAddress || 
+        allocation.meteoraLpLiquidity.poolAddress) {
+      response.allocation = {
+        teamPerformancePackageAddress: allocation.teamPerformancePackage.address?.toString(),
+        futarchyAmmVaultAddress: allocation.futarchyAmmLiquidity.vaultAddress?.toString(),
+        meteoraPoolAddress: allocation.meteoraLpLiquidity.poolAddress?.toString(),
+        meteoraVaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
+        daoAddress: allocation.daoAddress?.toString(),
+        launchAddress: allocation.launchAddress?.toString(),
+      };
+    }
+
+    res.json(response);
   } catch (error: any) {
     console.error('Error in /api/supply/:mintAddress/circulating:', error);
     res.status(500).json({
@@ -442,6 +516,45 @@ app.post('/api/dune/execute', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Error executing Dune query:', error);
     res.status(500).json({ error: error.message || 'Internal server error' });
+  }
+});
+
+// Aggregate Volume Endpoint - Daily volume data with totals for all DAO tokens
+app.get('/api/volume/aggregate', async (req: Request, res: Response) => {
+  try {
+    const futarchyService = getFutarchyService();
+    const duneService = getDuneService();
+    
+    if (!duneService) {
+      return res.status(400).json({ 
+        error: 'Dune service not configured',
+        message: 'DUNE_API_KEY environment variable is required'
+      });
+    }
+
+    // Automatically fetch all DAO tokens from the futarchy protocol
+    const allDaos = await futarchyService.getAllDaos();
+    const tokenAddresses = allDaos.map(dao => dao.baseMint.toString());
+
+    if (tokenAddresses.length === 0) {
+      return res.status(404).json({
+        error: 'No DAOs found',
+        message: 'No active DAOs were discovered in the Futarchy protocol'
+      });
+    }
+
+    console.log(`[Volume] Fetching aggregate volume for ${tokenAddresses.length} DAO tokens since launch`);
+
+    // Always fetch full history since launch
+    const aggregateData = await duneService.getAggregateVolume(tokenAddresses, true);
+
+    res.json(aggregateData);
+  } catch (error: any) {
+    console.error('Error in /api/volume/aggregate:', error);
+    res.status(500).json({ 
+      error: 'Failed to fetch aggregate volume',
+      message: error.message || 'Internal server error'
+    });
   }
 });
 
@@ -557,10 +670,11 @@ app.get('/', (req: Request, res: Response) => {
     version: '1.0.0',
     documentation: 'https://docs.coingecko.com/reference/exchanges-list',
     endpoints: {
-      tickers: '/api/tickers - Returns all DAO tickers',
-      supply: '/api/supply/:mintAddress - Returns supply info for any token',
-      supply_total: '/api/supply/:mintAddress/total - Returns total supply',
-      supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply',
+      tickers: '/api/tickers - Returns all DAO tickers with pricing and volume',
+      supply: '/api/supply/:mintAddress - Returns complete supply breakdown with allocation details',
+      supply_total: '/api/supply/:mintAddress/total - Returns total supply only',
+      supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply (excludes team performance package)',
+      volume_aggregate: '/api/volume/aggregate - Returns aggregate volume with daily breakdown for all DAO tokens since launch',
       health: '/health',
     },
     dex: {
@@ -568,7 +682,14 @@ app.get('/', (req: Request, res: Response) => {
       factory_address: config.dex.factoryAddress,
       router_address: config.dex.routerAddress,
     },
-    note: 'This API automatically discovers and aggregates all DAOs from the Futarchy protocol',
+    supplyBreakdown: {
+      description: 'For launchpad tokens, supply is broken down into:',
+      circulatingSupply: 'Total supply minus team performance package (liquidity IS circulating)',
+      teamPerformancePackage: 'Locked tokens allocated to the team (price-based unlock) - NOT circulating',
+      futarchyAmmLiquidity: 'Tokens in the internal FutarchyAMM for spot trading - IS circulating',
+      meteoraLpLiquidity: 'Tokens in the external Meteora DAMM pool (POL) - IS circulating',
+    },
+    note: 'This API automatically discovers and aggregates all DAOs from the Futarchy protocol.',
   });
 });
 

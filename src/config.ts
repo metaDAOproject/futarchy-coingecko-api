@@ -35,5 +35,6 @@ export const config = {
   dune: {
     apiKey: process.env.DUNE_API_KEY || '',
     queryId: process.env.DUNE_QUERY_ID ? parseInt(process.env.DUNE_QUERY_ID) : undefined,
+    aggregateVolumeQueryId: process.env.DUNE_AGGREGATE_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_AGGREGATE_VOLUME_QUERY_ID) : 6422948,
   },
 };

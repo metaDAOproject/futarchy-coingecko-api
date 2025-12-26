@@ -32,26 +32,68 @@ export interface DuneQuery {
   }>;
 }
 
+// Daily volume data for a single token on a specific date
+export interface DuneDailyVolume {
+  token: string;
+  date: string;
+  base_volume: string;
+  target_volume: string;
+  high: string;
+  low: string;
+}
+
+// Aggregate volume data for a single token (totals across all dates)
+export interface DuneAggregateTokenVolume {
+  token: string;
+  first_trade_date: string;
+  last_trade_date: string;
+  total_base_volume: string;
+  total_target_volume: string;
+  all_time_high: string;
+  all_time_low: string;
+  trading_days: number;
+  daily_data: DuneDailyVolume[];
+}
+
+// Complete aggregate volume response
+export interface DuneAggregateVolumeResponse {
+  tokens: DuneAggregateTokenVolume[];
+  query_metadata: {
+    since_start: boolean;
+    token_count: number;
+    total_trading_days: number;
+    execution_time_millis: number;
+  };
+}
+
 export class DuneService {
   private apiKey: string;
   private queryId?: number;
+  private aggregateVolumeQueryId?: number;
   private baseUrl: string = 'https://api.dune.com/api/v1';
   private cache: Map<string, { data: DunePoolMetrics | null; timestamp: number }>;
   private batchCache: Map<string, { data: Map<string, DunePoolMetrics>; timestamp: number }>;
+  private aggregateVolumeCache: Map<string, { data: DuneAggregateVolumeResponse; timestamp: number }>;
   private cacheTTL: number = 60000; // 1 minute cache for individual pools
   private batchCacheTTL: number = 300000; // 5 minutes cache for batch queries (Dune queries are heavy)
+  private aggregateVolumeCacheTTL: number = 600000; // 10 minutes cache for aggregate volume (heavy historical query)
 
   constructor() {
     this.apiKey = config.dune.apiKey;
     this.queryId = config.dune.queryId;
+    this.aggregateVolumeQueryId = config.dune.aggregateVolumeQueryId;
     this.cache = new Map();
     this.batchCache = new Map();
+    this.aggregateVolumeCache = new Map();
     // Allow configurable cache TTLs from environment
     if (process.env.DUNE_CACHE_TTL) {
       this.cacheTTL = parseInt(process.env.DUNE_CACHE_TTL) * 1000; // Convert seconds to milliseconds
     }
     if (process.env.DUNE_BATCH_CACHE_TTL) {
       this.batchCacheTTL = parseInt(process.env.DUNE_BATCH_CACHE_TTL) * 1000; // Convert seconds to milliseconds
+    }
+    if (process.env.DUNE_AGGREGATE_VOLUME_CACHE_TTL) {
+      this.aggregateVolumeCacheTTL = parseInt(process.env.DUNE_AGGREGATE_VOLUME_CACHE_TTL) * 1000;
     }
   }
 
@@ -706,6 +748,182 @@ ORDER BY base_volume_24h DESC;
   async executeGeneratedQuery(tokenAddresses?: string[]): Promise<DuneQueryResult> {
     const sqlQuery = this.generate24hMetricsQuery(tokenAddresses);
     return await this.executeRawQuery(sqlQuery, 'Futarchy AMM 24h Metrics');
+  }
+
+  /**
+   * Fetch aggregate volume data with daily breakdown for tokens
+   * Uses Dune query 6422948 which returns daily volume data since start or last 24h
+   * @param tokenAddresses List of token addresses to filter by
+   * @param sinceStart Whether to fetch all historical data (true) or just last 24h (false)
+   * @returns Aggregate volume data with daily breakdown per token
+   */
+  async getAggregateVolume(
+    tokenAddresses: string[],
+    sinceStart: boolean = true
+  ): Promise<DuneAggregateVolumeResponse> {
+    if (!this.apiKey) {
+      throw new Error('Dune API key not configured');
+    }
+
+    if (!this.aggregateVolumeQueryId) {
+      throw new Error('Aggregate volume query ID not configured');
+    }
+
+    // Create cache key based on token list and sinceStart flag
+    const cacheKey = `aggregate_volume_${sinceStart ? 'all' : '24h'}_${tokenAddresses.sort().join(',')}`;
+    
+    // Check cache
+    const cached = this.aggregateVolumeCache.get(cacheKey);
+    if (cached && Date.now() - cached.timestamp < this.aggregateVolumeCacheTTL) {
+      console.log(`[Dune] Using cached aggregate volume (age: ${Math.round((Date.now() - cached.timestamp) / 1000)}s)`);
+      return cached.data;
+    }
+
+    try {
+      // Build query parameters
+      const parameters: Record<string, any> = {
+        since_start: sinceStart.toString(),
+      };
+      
+      if (tokenAddresses && tokenAddresses.length > 0) {
+        // Format tokens with single quotes around each token, comma-separated
+        // The Dune query expects format: 'token1', 'token2', 'token3'
+        parameters.token_list = tokenAddresses.map(token => `'${token}'`).join(', ');
+        console.log('[Dune] Aggregate volume query with', tokenAddresses.length, 'tokens, since_start:', sinceStart);
+      } else {
+        parameters.token_list = '';
+        console.log('[Dune] Aggregate volume query for all tokens, since_start:', sinceStart);
+      }
+
+      console.log('[Dune] Executing aggregate volume query ID:', this.aggregateVolumeQueryId);
+      
+      // Execute the query with parameters
+      const executeResult = await this.executeQuery(this.aggregateVolumeQueryId, parameters);
+      console.log(`[Dune] Aggregate volume query started, execution_id: ${executeResult.execution_id}`);
+      
+      // Wait for results
+      const queryResult = await this.getQueryResults(executeResult.execution_id);
+      console.log('[Dune] Aggregate volume query completed, rows:', queryResult.rows?.length || 0);
+
+      // Process results into structured format
+      // Group rows by token and aggregate
+      const tokenDataMap = new Map<string, {
+        dailyData: DuneDailyVolume[];
+        firstDate: string;
+        lastDate: string;
+        totalBaseVolume: number;
+        totalTargetVolume: number;
+        allTimeHigh: number;
+        allTimeLow: number;
+      }>();
+
+      if (queryResult.rows && queryResult.rows.length > 0) {
+        for (const row of queryResult.rows) {
+          const rowAny = row as any;
+          const token = rowAny.token || rowAny.pool_id;
+          
+          if (!token) continue;
+
+          // Get or initialize token data
+          let tokenData = tokenDataMap.get(token);
+          if (!tokenData) {
+            tokenData = {
+              dailyData: [],
+              firstDate: '',
+              lastDate: '',
+              totalBaseVolume: 0,
+              totalTargetVolume: 0,
+              allTimeHigh: 0,
+              allTimeLow: Infinity,
+            };
+            tokenDataMap.set(token, tokenData);
+          }
+
+          // Parse the date - handle various date formats from Dune
+          const dateStr = rowAny.date || rowAny.trading_date || rowAny.block_date || '';
+          const baseVolume = parseFloat(this.convertScientificNotation(rowAny.base_volume)) || 0;
+          const targetVolume = parseFloat(this.convertScientificNotation(rowAny.target_volume)) || 0;
+          const high = parseFloat(this.convertScientificNotation(rowAny.high)) || 0;
+          const low = parseFloat(this.convertScientificNotation(rowAny.low)) || Infinity;
+
+          // Add daily data point
+          tokenData.dailyData.push({
+            token,
+            date: dateStr,
+            base_volume: this.convertScientificNotation(rowAny.base_volume) || '0',
+            target_volume: this.convertScientificNotation(rowAny.target_volume) || '0',
+            high: this.convertScientificNotation(rowAny.high) || '0',
+            low: this.convertScientificNotation(rowAny.low) || '0',
+          });
+
+          // Update aggregates
+          tokenData.totalBaseVolume += baseVolume;
+          tokenData.totalTargetVolume += targetVolume;
+          if (high > tokenData.allTimeHigh) tokenData.allTimeHigh = high;
+          if (low > 0 && low < tokenData.allTimeLow) tokenData.allTimeLow = low;
+          
+          // Track first and last dates
+          if (!tokenData.firstDate || dateStr < tokenData.firstDate) {
+            tokenData.firstDate = dateStr;
+          }
+          if (!tokenData.lastDate || dateStr > tokenData.lastDate) {
+            tokenData.lastDate = dateStr;
+          }
+        }
+      }
+
+      // Build response
+      const tokens: DuneAggregateTokenVolume[] = [];
+      let totalTradingDays = 0;
+
+      for (const [token, data] of tokenDataMap.entries()) {
+        // Sort daily data by date
+        data.dailyData.sort((a, b) => a.date.localeCompare(b.date));
+        
+        tokens.push({
+          token,
+          first_trade_date: data.firstDate,
+          last_trade_date: data.lastDate,
+          total_base_volume: data.totalBaseVolume.toFixed(8),
+          total_target_volume: data.totalTargetVolume.toFixed(8),
+          all_time_high: data.allTimeHigh > 0 ? data.allTimeHigh.toFixed(12) : '0',
+          all_time_low: data.allTimeLow < Infinity ? data.allTimeLow.toFixed(12) : '0',
+          trading_days: data.dailyData.length,
+          daily_data: data.dailyData,
+        });
+        
+        totalTradingDays += data.dailyData.length;
+      }
+
+      // Sort tokens by total volume descending
+      tokens.sort((a, b) => parseFloat(b.total_base_volume) - parseFloat(a.total_base_volume));
+
+      const response: DuneAggregateVolumeResponse = {
+        tokens,
+        query_metadata: {
+          since_start: sinceStart,
+          token_count: tokens.length,
+          total_trading_days: totalTradingDays,
+          execution_time_millis: queryResult.metadata?.execution_time_millis || 0,
+        },
+      };
+
+      // Cache the response
+      this.aggregateVolumeCache.set(cacheKey, { data: response, timestamp: Date.now() });
+      console.log(`[Dune] Cached aggregate volume for ${tokens.length} tokens`);
+
+      return response;
+    } catch (error: any) {
+      console.error('[Dune] Error fetching aggregate volume:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the aggregate volume query ID
+   */
+  getAggregateVolumeQueryId(): number | undefined {
+    return this.aggregateVolumeQueryId;
   }
 }
 
