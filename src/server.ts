@@ -237,15 +237,8 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
         if (duneMetrics) {
           // Use Dune data for base volume, high, and low
           baseVolume = duneMetrics.base_volume_24h;
-          // Calculate target_volume from base_volume * last_price to ensure consistency
-          const baseVolumeNum = parseFloat(baseVolume);
-          const lastPriceNum = parseFloat(lastPrice);
-          if (isFinite(baseVolumeNum) && isFinite(lastPriceNum) && baseVolumeNum > 0 && lastPriceNum > 0) {
-            targetVolume = (baseVolumeNum * lastPriceNum).toFixed(12);
-          } else {
-            // Fallback to Dune's target_volume if calculation fails
-            targetVolume = duneMetrics.target_volume_24h;
-          }
+          targetVolume = duneMetrics.target_volume_24h;
+          
           high24h = duneMetrics.high_24h !== '0' ? duneMetrics.high_24h : undefined;
           low24h = duneMetrics.low_24h !== '0' ? duneMetrics.low_24h : undefined;
         } else {
