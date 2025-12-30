@@ -77,6 +77,7 @@ export class DuneService {
   private cacheTTL: number = 60000; // 1 minute cache for individual pools
   private batchCacheTTL: number = 300000; // 5 minutes cache for batch queries (Dune queries are heavy)
   private aggregateVolumeCacheTTL: number = 600000; // 10 minutes cache for aggregate volume (heavy historical query)
+  private fetchTimeout: number = 240000; // 4 minutes timeout for Dune API calls
 
   constructor() {
     this.apiKey = config.dune.apiKey;
@@ -94,6 +95,30 @@ export class DuneService {
     }
     if (process.env.DUNE_AGGREGATE_VOLUME_CACHE_TTL) {
       this.aggregateVolumeCacheTTL = parseInt(process.env.DUNE_AGGREGATE_VOLUME_CACHE_TTL) * 1000;
+    }
+    if (process.env.DUNE_FETCH_TIMEOUT) {
+      this.fetchTimeout = parseInt(process.env.DUNE_FETCH_TIMEOUT) * 1000; // Convert seconds to milliseconds
+    }
+  }
+
+  /**
+   * Fetch with timeout wrapper
+   * @param url The URL to fetch
+   * @param options Fetch options
+   * @returns Response promise
+   */
+  private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), this.fetchTimeout);
+    
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
     }
   }
 
@@ -254,7 +279,7 @@ ORDER BY base_volume_24h DESC;
 
     const method = query.query_id ? 'PATCH' : 'POST';
 
-    const response = await fetch(url, {
+    const response = await this.fetchWithTimeout(url, {
       method,
       headers: {
         'X-Dune-API-Key': this.apiKey,
@@ -379,7 +404,7 @@ ORDER BY base_volume_24h DESC;
       console.log('[Dune] Sending parameters:', JSON.stringify(stringParams));
     }
     
-    const response = await fetch(executeUrl, {
+    const response = await this.fetchWithTimeout(executeUrl, {
       method: 'POST',
       headers: {
         'X-Dune-API-Key': this.apiKey,
@@ -418,7 +443,7 @@ ORDER BY base_volume_24h DESC;
   private async getExecutionStatus(executionId: string): Promise<any> {
     const statusUrl = `${this.baseUrl}/execution/${executionId}/status`;
     
-    const response = await fetch(statusUrl, {
+    const response = await this.fetchWithTimeout(statusUrl, {
       method: 'GET',
       headers: {
         'X-Dune-API-Key': this.apiKey,
@@ -450,7 +475,7 @@ ORDER BY base_volume_24h DESC;
       
       if (status.state === 'QUERY_STATE_COMPLETED') {
         // Query completed, fetch results
-        const response = await fetch(resultsUrl, {
+        const response = await this.fetchWithTimeout(resultsUrl, {
           method: 'GET',
           headers: {
             'X-Dune-API-Key': this.apiKey,
@@ -519,7 +544,7 @@ ORDER BY base_volume_24h DESC;
    */
   private async getLatestResults(queryId: number, maxAgeHours: number = 3): Promise<DuneQueryResult | null> {
     try {
-      const response = await fetch(`${this.baseUrl}/query/${queryId}/results`, {
+      const response = await this.fetchWithTimeout(`${this.baseUrl}/query/${queryId}/results`, {
         method: 'GET',
         headers: {
           'X-Dune-API-Key': this.apiKey,

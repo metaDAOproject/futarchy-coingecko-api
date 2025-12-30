@@ -10,6 +10,10 @@ export const config = {
   },
   server: {
     port: parseInt(process.env.PORT || '3000'),
+    // Request timeout in milliseconds (default: 5 minutes)
+    requestTimeout: parseInt(process.env.SERVER_REQUEST_TIMEOUT || '300000'),
+    // Keep-alive timeout in milliseconds (default: 5 minutes)
+    keepAliveTimeout: parseInt(process.env.SERVER_KEEP_ALIVE_TIMEOUT || '300000'),
     rateLimit: {
       windowMs: 60000, // 1 minute
       maxRequests: 60, // 60 requests per minute

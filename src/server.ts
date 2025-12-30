@@ -2,6 +2,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import { FutarchyService } from './services/futarchyService.js';
 import { PriceService } from './services/priceService.js';
 import { DuneService } from './services/duneService.js';
+import { DuneCacheService } from './services/duneCacheService.js';
 import { SolanaService } from './services/solanaService.js';
 import { LaunchpadService } from './services/launchpadService.js';
 import { config } from './config.js';
@@ -16,6 +17,7 @@ const app = express();
 let futarchyServiceInstance: FutarchyService | null = null;
 let priceServiceInstance: PriceService | null = null;
 let duneServiceInstance: DuneService | null = null;
+let duneCacheServiceInstance: DuneCacheService | null = null;
 let solanaServiceInstance: SolanaService | null = null;
 let launchpadServiceInstance: LaunchpadService | null = null;
 
@@ -39,6 +41,17 @@ function getDuneService(): DuneService | null {
     duneServiceInstance = new DuneService();
   }
   return duneServiceInstance;
+}
+
+function getDuneCacheService(): DuneCacheService | null {
+  if (!duneCacheServiceInstance) {
+    const duneService = getDuneService();
+    const futarchyService = getFutarchyService();
+    if (duneService) {
+      duneCacheServiceInstance = new DuneCacheService(duneService, futarchyService);
+    }
+  }
+  return duneCacheServiceInstance;
 }
 
 function getSolanaService(): SolanaService {
@@ -66,6 +79,10 @@ export function setPriceService(service: PriceService | null): void {
 
 export function setDuneService(service: DuneService | null): void {
   duneServiceInstance = service;
+}
+
+export function setDuneCacheService(service: DuneCacheService | null): void {
+  duneCacheServiceInstance = service;
 }
 
 export function setSolanaService(service: SolanaService | null): void {
@@ -115,65 +132,24 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
   try {
     const futarchyService = getFutarchyService();
     const priceService = getPriceService();
-    const duneService = getDuneService();
+    const duneCacheService = getDuneCacheService();
     
     // Fetch all DAOs with their pool data
     const allDaos = await futarchyService.getAllDaos();
     
-    // Collect baseMint addresses from all DAOs to pass to Dune query
-    const baseMintAddresses = allDaos.map(dao => dao.baseMint.toString());
-    
-    // Create a map from baseMint (token) to DAO address for lookup
-    const tokenToDaoMap = new Map<string, string>();
-    for (const dao of allDaos) {
-      tokenToDaoMap.set(dao.baseMint.toString().toLowerCase(), dao.daoAddress.toString().toLowerCase());
-    }
-    
-    // Fetch 24h metrics from Dune for all pools in batch (if Dune is configured)
-    // Note: Dune returns metrics keyed by token (baseMint), we need to map to DAO address
+    // Get cached Dune metrics (already mapped to DAO address by the cache service)
     let duneMetricsMap = new Map<string, { base_volume_24h: string; target_volume_24h: string; high_24h: string; low_24h: string }>();
-    if (duneService) {
-      try {
-        console.log(`[Dune] Fetching metrics for ${baseMintAddresses.length} tokens:`, baseMintAddresses.slice(0, 5), baseMintAddresses.length > 5 ? '...' : '');
-        // Pass token addresses to filter the query
-        // Dune returns metrics keyed by token (baseMint), not DAO address
-        const allDuneMetrics = await duneService.getAllPoolsMetrics24h(baseMintAddresses);
-        console.log(`[Dune] Received ${allDuneMetrics.size} pool metrics from Dune`);
-        
-        if (allDuneMetrics.size > 0) {
-          console.log('[Dune] Token addresses found:', Array.from(allDuneMetrics.keys()).slice(0, 5));
-        } else {
-          console.warn('[Dune] No metrics returned from query - this could mean:');
-          console.warn('  - No transactions in the last 24 hours');
-          console.warn('  - Query returned no matching pools');
-          console.warn('  - Query execution failed silently');
-        }
-        
-        // Map from token (baseMint) to DAO address
-        for (const [tokenAddress, metrics] of allDuneMetrics.entries()) {
-          const daoAddress = tokenToDaoMap.get(tokenAddress.toLowerCase());
-          if (daoAddress) {
-            console.log(`[Dune] Mapping token ${tokenAddress} to DAO ${daoAddress}`);
-            duneMetricsMap.set(daoAddress, {
-              base_volume_24h: metrics.base_volume_24h,
-              target_volume_24h: metrics.target_volume_24h,
-              high_24h: metrics.high_24h,
-              low_24h: metrics.low_24h,
-            });
-          } else {
-            console.warn(`[Dune] No DAO found for token ${tokenAddress}`);
-          }
-        }
-      } catch (error: any) {
-        console.error('[Dune] Error fetching Dune metrics:', error);
-        console.error('[Dune] Error details:', error.message);
-        if (error.stack) {
-          console.error('[Dune] Stack trace:', error.stack);
-        }
-        // Continue without Dune data if it fails
+    if (duneCacheService) {
+      const cachedMetrics = duneCacheService.getPoolMetrics();
+      if (cachedMetrics && cachedMetrics.size > 0) {
+        const cacheStatus = duneCacheService.getCacheStatus();
+        console.log(`[DuneCache] Using cached metrics (age: ${Math.round(cacheStatus.cacheAgeMs / 1000)}s, ${cachedMetrics.size} entries)`);
+        duneMetricsMap = cachedMetrics;
+      } else {
+        console.warn('[DuneCache] No cached metrics available yet');
       }
     } else {
-      console.warn('[Dune] Dune service not configured - set DUNE_API_KEY in environment');
+      console.warn('[DuneCache] Dune cache service not configured - set DUNE_API_KEY in environment');
     }
     
     // Generate tickers for all DAOs
@@ -243,10 +219,10 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
           low24h = duneMetrics.low_24h !== '0' ? duneMetrics.low_24h : undefined;
         } else {
           // Only log once per request, not for every pool
-          if (tickers.length === 0 && duneService) {
-            console.log(`[Dune] No metrics found for pool ${poolId}, calculating volumes from protocol fees`);
-            console.log(`[Dune] Looking for pool_id: ${poolId.toLowerCase()}`);
-            console.log(`[Dune] Available pool IDs in map:`, Array.from(duneMetricsMap.keys()).slice(0, 10));
+          if (tickers.length === 0 && duneCacheService) {
+            console.log(`[DuneCache] No metrics found for pool ${poolId}, calculating volumes from protocol fees`);
+            console.log(`[DuneCache] Looking for pool_id: ${poolId.toLowerCase()}`);
+            console.log(`[DuneCache] Available pool IDs in map:`, Array.from(duneMetricsMap.keys()).slice(0, 10));
           }
           // Fallback: Calculate volumes from protocol fees
           const volumeData = priceService.calculateVolumeFromFees(
@@ -328,10 +304,74 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
 
 // Health check
 app.get('/health', (req: Request, res: Response) => {
+  const duneCacheService = getDuneCacheService();
+  const cacheStatus = duneCacheService?.getCacheStatus();
+  
   res.json({
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
+    duneCache: cacheStatus ? {
+      lastUpdated: cacheStatus.lastUpdated.toISOString(),
+      isRefreshing: cacheStatus.isRefreshing,
+      poolMetricsCount: cacheStatus.poolMetricsCount,
+      aggregateVolumeTokenCount: cacheStatus.aggregateVolumeTokenCount,
+      cacheAgeSeconds: Math.round(cacheStatus.cacheAgeMs / 1000),
+      isInitialized: cacheStatus.isInitialized,
+    } : null,
+  });
+});
+
+// Cache status and management endpoint
+app.get('/api/cache/status', (req: Request, res: Response) => {
+  const duneCacheService = getDuneCacheService();
+  
+  if (!duneCacheService) {
+    return res.status(400).json({
+      error: 'Dune cache service not configured',
+      message: 'DUNE_API_KEY environment variable is required',
+    });
+  }
+
+  const status = duneCacheService.getCacheStatus();
+  res.json({
+    lastUpdated: status.lastUpdated.toISOString(),
+    isRefreshing: status.isRefreshing,
+    poolMetricsCount: status.poolMetricsCount,
+    aggregateVolumeTokenCount: status.aggregateVolumeTokenCount,
+    cacheAgeSeconds: Math.round(status.cacheAgeMs / 1000),
+    isInitialized: status.isInitialized,
+    refreshIntervalSeconds: parseInt(process.env.DUNE_CACHE_REFRESH_INTERVAL || '3600'),
+  });
+});
+
+// Force cache refresh endpoint (admin/debug use)
+app.post('/api/cache/refresh', async (req: Request, res: Response) => {
+  const duneCacheService = getDuneCacheService();
+  
+  if (!duneCacheService) {
+    return res.status(400).json({
+      error: 'Dune cache service not configured',
+      message: 'DUNE_API_KEY environment variable is required',
+    });
+  }
+
+  const statusBefore = duneCacheService.getCacheStatus();
+  if (statusBefore.isRefreshing) {
+    return res.status(409).json({
+      error: 'Refresh already in progress',
+      message: 'A cache refresh is already running. Please wait for it to complete.',
+    });
+  }
+
+  // Start refresh in background and return immediately
+  duneCacheService.forceRefresh().catch(err => {
+    console.error('[Cache] Force refresh failed:', err);
+  });
+
+  res.json({
+    message: 'Cache refresh started',
+    previousLastUpdated: statusBefore.lastUpdated.toISOString(),
   });
 });
 
@@ -515,33 +555,40 @@ app.post('/api/dune/execute', async (req: Request, res: Response) => {
 // Aggregate Volume Endpoint - Daily volume data with totals for all DAO tokens
 app.get('/api/volume/aggregate', async (req: Request, res: Response) => {
   try {
-    const futarchyService = getFutarchyService();
-    const duneService = getDuneService();
+    const duneCacheService = getDuneCacheService();
     
-    if (!duneService) {
+    if (!duneCacheService) {
       return res.status(400).json({ 
-        error: 'Dune service not configured',
+        error: 'Dune cache service not configured',
         message: 'DUNE_API_KEY environment variable is required'
       });
     }
 
-    // Automatically fetch all DAO tokens from the futarchy protocol
-    const allDaos = await futarchyService.getAllDaos();
-    const tokenAddresses = allDaos.map(dao => dao.baseMint.toString());
-
-    if (tokenAddresses.length === 0) {
+    // Get cached aggregate volume data
+    const cachedAggregateVolume = duneCacheService.getAggregateVolume();
+    
+    if (!cachedAggregateVolume) {
+      const cacheStatus = duneCacheService.getCacheStatus();
+      if (cacheStatus.isRefreshing) {
+        return res.status(503).json({
+          error: 'Cache is being populated',
+          message: 'The server is still loading data. Please try again in a few minutes.',
+          cacheStatus: {
+            isRefreshing: true,
+            isInitialized: cacheStatus.isInitialized,
+          }
+        });
+      }
       return res.status(404).json({
-        error: 'No DAOs found',
-        message: 'No active DAOs were discovered in the Futarchy protocol'
+        error: 'No aggregate volume data available',
+        message: 'Cache has not been populated yet. Please wait for the next refresh cycle.'
       });
     }
 
-    console.log(`[Volume] Fetching aggregate volume for ${tokenAddresses.length} DAO tokens since launch`);
+    const cacheStatus = duneCacheService.getCacheStatus();
+    console.log(`[Volume] Returning cached aggregate volume (age: ${Math.round(cacheStatus.cacheAgeMs / 1000)}s, ${cachedAggregateVolume.tokens.length} tokens)`);
 
-    // Always fetch full history since launch
-    const aggregateData = await duneService.getAggregateVolume(tokenAddresses, true);
-
-    res.json(aggregateData);
+    res.json(cachedAggregateVolume);
   } catch (error: any) {
     console.error('Error in /api/volume/aggregate:', error);
     res.status(500).json({ 
@@ -658,6 +705,9 @@ app.get('/api/dune/debug', async (req: Request, res: Response) => {
 
 // Root endpoint
 app.get('/', (req: Request, res: Response) => {
+  const duneCacheService = getDuneCacheService();
+  const cacheStatus = duneCacheService?.getCacheStatus();
+  
   res.json({
     name: 'Futarchy AMM - CoinGecko API',
     version: '1.0.0',
@@ -668,6 +718,8 @@ app.get('/', (req: Request, res: Response) => {
       supply_total: '/api/supply/:mintAddress/total - Returns total supply only',
       supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply (excludes team performance package)',
       volume_aggregate: '/api/volume/aggregate - Returns aggregate volume with daily breakdown for all DAO tokens since launch',
+      cache_status: '/api/cache/status - Returns Dune cache status information',
+      cache_refresh: 'POST /api/cache/refresh - Force a cache refresh',
       health: '/health',
     },
     dex: {
@@ -682,6 +734,16 @@ app.get('/', (req: Request, res: Response) => {
       futarchyAmmLiquidity: 'Tokens in the internal FutarchyAMM for spot trading - IS circulating',
       meteoraLpLiquidity: 'Tokens in the external Meteora DAMM pool (POL) - IS circulating',
     },
+    caching: {
+      description: 'Dune data is cached and refreshed hourly to improve response times',
+      refreshInterval: `${parseInt(process.env.DUNE_CACHE_REFRESH_INTERVAL || '3600')} seconds`,
+      fetchTimeout: `${parseInt(process.env.DUNE_FETCH_TIMEOUT || '240')} seconds`,
+      status: cacheStatus ? {
+        isInitialized: cacheStatus.isInitialized,
+        poolMetricsCount: cacheStatus.poolMetricsCount,
+        lastUpdated: cacheStatus.lastUpdated.toISOString(),
+      } : 'Not available (DUNE_API_KEY not set)',
+    },
     note: 'This API automatically discovers and aggregates all DAOs from the Futarchy protocol.',
   });
 });
@@ -692,11 +754,57 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Start server
-app.listen(config.server.port, () => {
+// Start server and initialize cache
+const server = app.listen(config.server.port, async () => {
   console.log(`✅ CoinGecko API running on port ${config.server.port}`);
   console.log(`📊 Tickers: http://localhost:${config.server.port}/api/tickers`);
   console.log(`📈 Health: http://localhost:${config.server.port}/health`);
+  
+  // Start the Dune cache service with hourly refresh
+  const duneCacheService = getDuneCacheService();
+  if (duneCacheService) {
+    console.log('🔄 Starting Dune cache service...');
+    try {
+      await duneCacheService.start();
+      console.log('✅ Dune cache service started successfully');
+    } catch (error) {
+      console.error('❌ Failed to start Dune cache service:', error);
+    }
+  } else {
+    console.warn('⚠️ Dune cache service not available - set DUNE_API_KEY to enable caching');
+  }
+});
+
+// Set server timeouts to handle long-running requests (default: 5 minutes)
+server.timeout = config.server.requestTimeout;
+server.keepAliveTimeout = config.server.keepAliveTimeout;
+// Headers timeout should be slightly longer than keepAliveTimeout
+server.headersTimeout = config.server.keepAliveTimeout + 1000;
+console.log(`⏱️ Server timeouts configured: request=${config.server.requestTimeout}ms, keepAlive=${config.server.keepAliveTimeout}ms`);
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down gracefully...');
+  const duneCacheService = getDuneCacheService();
+  if (duneCacheService) {
+    duneCacheService.stop();
+  }
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down gracefully...');
+  const duneCacheService = getDuneCacheService();
+  if (duneCacheService) {
+    duneCacheService.stop();
+  }
+  server.close(() => {
+    console.log('Server closed');
+    process.exit(0);
+  });
 });
 
 export default app;
