@@ -20,7 +20,10 @@ export const config = {
     },
   },
   cache: {
-    tickersTTL: 10000, // 10 seconds
+    // TTL for blockchain data cache in milliseconds (default: 10 seconds)
+    // Lower = more real-time prices but more RPC calls
+    // Higher = less RPC load but slightly stale prices
+    tickersTTL: parseInt(process.env.CACHE_TICKERS_TTL || '10000'),
   },
   dex: {
     forkType: process.env.DEX_FORK_TYPE || 'Custom',
