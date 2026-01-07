@@ -98,8 +98,7 @@ export class TenMinuteVolumeService {
         console.log(`[TenMinVolume] Backfilling from ${startTime.toISOString()}`);
         await this.fetchAndStore(startTime, true);
 
-        // Prune old data
-        await this.databaseService.pruneOldTenMinuteData(25);
+        // Note: Not pruning data - keeping all historical records
 
         this.initialized = true;
         console.log('[TenMinVolume] Initialization complete');
@@ -193,8 +192,7 @@ export class TenMinuteVolumeService {
       const currentBucket = this.getCurrentBucketStart();
       await this.databaseService.markTenMinuteBucketsComplete(currentBucket.toISOString());
 
-      // Prune old data periodically
-      await this.databaseService.pruneOldTenMinuteData(25);
+      // Note: Not pruning data - keeping all historical records
 
       this.lastRefreshTime = new Date();
       console.log('[TenMinVolume] Refresh complete');
@@ -212,7 +210,7 @@ export class TenMinuteVolumeService {
     console.log('[TenMinVolume] Force refresh requested - backfilling last 24h');
     const startTime = new Date(Date.now() - 24 * 60 * 60 * 1000);
     await this.fetchAndStore(startTime, true);
-    await this.databaseService.pruneOldTenMinuteData(25);
+    // Note: Not pruning data - keeping all historical records
     this.lastRefreshTime = new Date();
   }
 

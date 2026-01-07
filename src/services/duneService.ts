@@ -460,6 +460,65 @@ ORDER BY base_volume_24h DESC;
   }
 
   /**
+   * Fetch all paginated results from a URL
+   * Dune API returns next_uri when there are more results
+   */
+  private async fetchAllPaginatedResults(initialUrl: string): Promise<{ rows: any[], metadata: any }> {
+    const allRows: any[] = [];
+    let currentUrl: string | null = initialUrl;
+    let metadata: any = null;
+    let pageCount = 0;
+    
+    while (currentUrl) {
+      pageCount++;
+      console.log(`[Dune] Fetching page ${pageCount}...`);
+      
+      const response = await this.fetchWithTimeout(currentUrl, {
+        method: 'GET',
+        headers: {
+          'X-Dune-API-Key': this.apiKey,
+        },
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Dune API error: ${response.status} ${response.statusText} - ${errorText}`);
+      }
+
+      const result = await response.json() as any;
+      
+      // Extract rows from this page
+      const pageRows = result.result?.rows || result.rows || [];
+      allRows.push(...pageRows);
+      
+      // Store metadata from first page
+      if (!metadata && result.result?.metadata) {
+        metadata = result.result.metadata;
+      }
+      
+      console.log(`[Dune] Page ${pageCount}: ${pageRows.length} rows (total: ${allRows.length})`);
+      
+      // Check for next page
+      if (result.next_uri) {
+        // next_uri can be relative or absolute - handle both cases
+        if (result.next_uri.startsWith('http')) {
+          currentUrl = result.next_uri;
+        } else {
+          currentUrl = `https://api.dune.com${result.next_uri}`;
+        }
+      } else {
+        currentUrl = null;
+      }
+    }
+    
+    if (pageCount > 1) {
+      console.log(`[Dune] Fetched ${pageCount} pages, total rows: ${allRows.length}`);
+    }
+    
+    return { rows: allRows, metadata };
+  }
+
+  /**
    * Get the execution results
    * Based on DefiLlama's implementation: https://github.com/DefiLlama/dimension-adapters/blob/master/helpers/dune.ts
    */
@@ -474,39 +533,20 @@ ORDER BY base_volume_24h DESC;
       const status = await this.getExecutionStatus(executionId);
       
       if (status.state === 'QUERY_STATE_COMPLETED') {
-        // Query completed, fetch results
-        const response = await this.fetchWithTimeout(resultsUrl, {
-          method: 'GET',
-          headers: {
-            'X-Dune-API-Key': this.apiKey,
+        // Query completed, fetch all paginated results
+        const { rows, metadata } = await this.fetchAllPaginatedResults(resultsUrl);
+        
+        return {
+          rows,
+          metadata: {
+            column_names: metadata?.column_names || [],
+            result_set_bytes: metadata?.result_set_bytes || 0,
+            total_row_count: metadata?.total_row_count || rows.length,
+            datapoint_count: metadata?.datapoint_count || 0,
+            pending_time_millis: metadata?.pending_time_millis || 0,
+            execution_time_millis: metadata?.execution_time_millis || 0,
           },
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Dune API error: ${response.status} ${response.statusText} - ${errorText}`);
-        }
-
-        const result = await response.json() as any;
-        
-        // Parse result based on DefiLlama's format
-        // Result structure: { result: { rows, metadata: { column_names, column_types, ... } } }
-        if (result.result) {
-          return {
-            rows: result.result.rows || [],
-            metadata: {
-              column_names: result.result.metadata?.column_names || [],
-              result_set_bytes: result.result.metadata?.result_set_bytes || 0,
-              total_row_count: result.result.metadata?.total_row_count || result.result.rows?.length || 0,
-              datapoint_count: result.result.metadata?.datapoint_count || 0,
-              pending_time_millis: result.result.metadata?.pending_time_millis || 0,
-              execution_time_millis: result.result.metadata?.execution_time_millis || 0,
-            },
-          };
-        }
-        
-        // Fallback to direct result format
-        return result as DuneQueryResult;
+        };
       } else if (status.state === 'QUERY_STATE_FAILED') {
         // Status already contains error info, no need to fetch again
         const errorObj = (status as any).error || {};
@@ -541,10 +581,12 @@ ORDER BY base_volume_24h DESC;
   /**
    * Get latest results for a query without executing (if results are recent)
    * Based on DefiLlama's implementation
+   * Now with pagination support
    */
   private async getLatestResults(queryId: number, maxAgeHours: number = 3): Promise<DuneQueryResult | null> {
     try {
-      const response = await this.fetchWithTimeout(`${this.baseUrl}/query/${queryId}/results`, {
+      const initialUrl = `${this.baseUrl}/query/${queryId}/results`;
+      const response = await this.fetchWithTimeout(initialUrl, {
         method: 'GET',
         headers: {
           'X-Dune-API-Key': this.apiKey,
@@ -571,17 +613,54 @@ ORDER BY base_volume_24h DESC;
         return null;
       }
 
-      // Parse result format
+      // Parse result format and handle pagination
       if (result.result) {
+        const allRows = [...(result.result.rows || [])];
+        const metadata = result.result.metadata;
+        
+        // Check for more pages
+        let nextUri = result.next_uri;
+        let pageCount = 1;
+        
+        while (nextUri) {
+          pageCount++;
+          console.log(`[Dune] Fetching latest results page ${pageCount}...`);
+          
+          // next_uri can be relative or absolute - handle both cases
+          const nextUrl = nextUri.startsWith('http') ? nextUri : `https://api.dune.com${nextUri}`;
+          const nextResponse = await this.fetchWithTimeout(nextUrl, {
+            method: 'GET',
+            headers: {
+              'X-Dune-API-Key': this.apiKey,
+            },
+          });
+          
+          if (!nextResponse.ok) {
+            break;
+          }
+          
+          const nextResult = await nextResponse.json() as any;
+          const pageRows = nextResult.result?.rows || nextResult.rows || [];
+          allRows.push(...pageRows);
+          
+          console.log(`[Dune] Page ${pageCount}: ${pageRows.length} rows (total: ${allRows.length})`);
+          
+          nextUri = nextResult.next_uri;
+        }
+        
+        if (pageCount > 1) {
+          console.log(`[Dune] Fetched ${pageCount} pages of latest results, total rows: ${allRows.length}`);
+        }
+        
         return {
-          rows: result.result.rows || [],
+          rows: allRows,
           metadata: {
-            column_names: result.result.metadata?.column_names || [],
-            result_set_bytes: result.result.metadata?.result_set_bytes || 0,
-            total_row_count: result.result.metadata?.total_row_count || result.result.rows?.length || 0,
-            datapoint_count: result.result.metadata?.datapoint_count || 0,
-            pending_time_millis: result.result.metadata?.pending_time_millis || 0,
-            execution_time_millis: result.result.metadata?.execution_time_millis || 0,
+            column_names: metadata?.column_names || [],
+            result_set_bytes: metadata?.result_set_bytes || 0,
+            total_row_count: metadata?.total_row_count || allRows.length,
+            datapoint_count: metadata?.datapoint_count || 0,
+            pending_time_millis: metadata?.pending_time_millis || 0,
+            execution_time_millis: metadata?.execution_time_millis || 0,
           },
         };
       }

@@ -13,7 +13,11 @@
     "build": "tsc",
     "start": "bun dist/server.js",
     "prestart": "npm run build",
-    "test": "bun test"
+    "test": "bun test",
+    "backfill": "bun run scripts/backfill.ts",
+    "backfill:daily": "bun run scripts/backfill.ts daily",
+    "backfill:hourly": "bun run scripts/backfill.ts hourly",
+    "backfill:ten-minute": "bun run scripts/backfill.ts ten-minute"
   },
   "peerDependencies": {
     "typescript": "^5.9.3"

@@ -323,8 +323,7 @@ export class HourlyVolumeService {
             await this.databaseService.upsertHourlyVolumes(currentHourRecords, false);
           }
 
-          // Prune old data (keep 48 hours)
-          await this.databaseService.pruneOldHourlyData(48);
+          // Note: Not pruning data - keeping all historical records
         }
 
         // Update in-memory cache
