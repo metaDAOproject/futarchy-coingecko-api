@@ -324,43 +324,16 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
         let low24h: string | undefined;
 
         if (duneMetrics) {
-          // Use Dune data for base volume, high, and low
+          // Use volume data from database (10-min, hourly, or cache)
           baseVolume = duneMetrics.base_volume_24h;
           targetVolume = duneMetrics.target_volume_24h;
           
           high24h = duneMetrics.high_24h !== '0' ? duneMetrics.high_24h : undefined;
           low24h = duneMetrics.low_24h !== '0' ? duneMetrics.low_24h : undefined;
         } else {
-          // Only log once per request, not for every pool
-          if (tickers.length === 0 && duneCacheService) {
-            console.log(`[DuneCache] No metrics found for pool ${poolId}, calculating volumes from protocol fees`);
-            console.log(`[DuneCache] Looking for pool_id: ${poolId.toLowerCase()}`);
-            console.log(`[DuneCache] Available pool IDs in map:`, Array.from(duneMetricsMap.keys()).slice(0, 10));
-          }
-          // Fallback: Calculate volumes from protocol fees
-          const volumeData = priceService.calculateVolumeFromFees(
-            poolData.baseProtocolFees,
-            poolData.quoteProtocolFees,
-            baseDecimals,
-            quoteDecimals,
-            config.fees.protocolFeeRate
-          );
-
-          if (volumeData) {
-            baseVolume = volumeData.baseVolume;
-            targetVolume = volumeData.targetVolume;
-          } else {
-            // Fallback: estimate volume from reserves (old method)
-            const baseReservesNum = poolData.baseReserves.toNumber();
-            const quoteReservesNum = poolData.quoteReserves.toNumber();
-            
-            if (!isFinite(baseReservesNum) || !isFinite(quoteReservesNum)) {
-              continue;
-            }
-            
-            baseVolume = (baseReservesNum * 0.01 / Math.pow(10, baseDecimals)).toFixed(8);
-            targetVolume = (quoteReservesNum * 0.01 / Math.pow(10, quoteDecimals)).toFixed(8);
-          }
+          // No volume data found - show 0 (means no trading volume in last 24h)
+          baseVolume = '0';
+          targetVolume = '0';
         }
 
         // Final validation - ensure no NaN values
@@ -1090,12 +1063,16 @@ const server = app.listen(config.server.port, async () => {
     console.log('📊 Starting 10-Minute Volume service (PRIMARY for /api/tickers)...');
     try {
       await tenMinuteVolumeService.start();
-      console.log('✅ 10-Minute Volume service started successfully');
+      if (tenMinuteVolumeService.isInitialized) {
+        console.log('✅ 10-Minute Volume service started successfully');
+      } else {
+        console.log('⚠️ 10-Minute Volume service could not initialize (no data in DB and no query ID)');
+      }
     } catch (error) {
       console.error('❌ Failed to start 10-Minute Volume service:', error);
     }
   } else {
-    console.log('ℹ️ 10-Minute Volume service not available - requires DUNE_API_KEY and DUNE_TEN_MINUTE_VOLUME_QUERY_ID');
+    console.log('ℹ️ 10-Minute Volume service not available - requires DUNE_API_KEY');
   }
   
   // Start the Dune cache service with hourly refresh

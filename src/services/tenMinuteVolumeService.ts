@@ -49,14 +49,9 @@ export class TenMinuteVolumeService {
   }
 
   /**
-   * Initialize the service - backfill last 24h of 10-minute data
+   * Initialize the service - check database and optionally backfill
    */
   async initialize(): Promise<void> {
-    if (!config.dune.tenMinuteVolumeQueryId) {
-      console.log('[TenMinVolume] No DUNE_TEN_MINUTE_VOLUME_QUERY_ID configured - service disabled');
-      return;
-    }
-
     if (!this.databaseService.isAvailable()) {
       console.log('[TenMinVolume] Database not connected - service disabled');
       return;
@@ -71,37 +66,55 @@ export class TenMinuteVolumeService {
 
       // Get the latest bucket
       const latestBucket = await this.databaseService.getLatestTenMinuteBucket();
-      
-      // Calculate 24 hours ago
-      const now = new Date();
-      const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
-      // Determine start time for backfill
-      let startTime: Date;
       if (latestBucket) {
-        const latestDate = new Date(latestBucket);
-        // Start from the bucket after the latest one, or 24h ago, whichever is earlier
-        startTime = new Date(Math.min(latestDate.getTime(), twentyFourHoursAgo.getTime()));
-        console.log(`[TenMinVolume] Latest bucket: ${latestBucket}`);
-      } else {
-        // No data - backfill last 24 hours
-        startTime = twentyFourHoursAgo;
-        console.log('[TenMinVolume] No existing data - will backfill last 24 hours');
+        console.log(`[TenMinVolume] Latest bucket in DB: ${latestBucket}`);
       }
 
-      // Backfill from start time to now
-      console.log(`[TenMinVolume] Backfilling from ${startTime.toISOString()}`);
-      await this.fetchAndStore(startTime, true);
+      // If we have data, we can serve it even without Dune query ID
+      if (recordCount > 0) {
+        this.initialized = true;
+        console.log(`[TenMinVolume] Service initialized with ${recordCount} existing records`);
+      }
 
-      // Prune old data
-      await this.databaseService.pruneOldTenMinuteData(25);
+      // Only attempt backfill if query ID is configured
+      if (config.dune.tenMinuteVolumeQueryId) {
+        // Calculate 24 hours ago
+        const now = new Date();
+        const twentyFourHoursAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
-      this.initialized = true;
-      console.log('[TenMinVolume] Initialization complete');
+        // Determine start time for backfill
+        let startTime: Date;
+        if (latestBucket) {
+          const latestDate = new Date(latestBucket);
+          // Start from the bucket after the latest one, or 24h ago, whichever is earlier
+          startTime = new Date(Math.min(latestDate.getTime(), twentyFourHoursAgo.getTime()));
+        } else {
+          // No data - backfill last 24 hours
+          startTime = twentyFourHoursAgo;
+          console.log('[TenMinVolume] No existing data - will backfill last 24 hours');
+        }
+
+        // Backfill from start time to now
+        console.log(`[TenMinVolume] Backfilling from ${startTime.toISOString()}`);
+        await this.fetchAndStore(startTime, true);
+
+        // Prune old data
+        await this.databaseService.pruneOldTenMinuteData(25);
+
+        this.initialized = true;
+        console.log('[TenMinVolume] Initialization complete');
+      } else if (!this.initialized) {
+        console.log('[TenMinVolume] No DUNE_TEN_MINUTE_VOLUME_QUERY_ID configured - cannot fetch new data');
+        console.log('[TenMinVolume] Service will not be available until query ID is set or data exists in DB');
+      }
     } catch (error: any) {
       console.error('[TenMinVolume] Error during initialization:', error.message);
-      // Still mark as initialized so the service can try refreshes
-      this.initialized = true;
+      // Still mark as initialized if we have data so we can serve it
+      const recordCount = await this.databaseService.getTenMinuteRecordCount();
+      if (recordCount > 0) {
+        this.initialized = true;
+        console.log('[TenMinVolume] Serving existing data despite initialization error');
+      }
     }
   }
 
@@ -114,13 +127,16 @@ export class TenMinuteVolumeService {
       return;
     }
 
+    // Initialize first (will check DB and potentially backfill)
+    await this.initialize();
+
+    // If no query ID, we can still serve existing data but won't refresh
     if (!config.dune.tenMinuteVolumeQueryId) {
-      console.log('[TenMinVolume] No query ID configured - not starting refresh loop');
+      if (this.initialized) {
+        console.log('[TenMinVolume] Serving existing DB data (no refresh loop - set DUNE_TEN_MINUTE_VOLUME_QUERY_ID to enable)');
+      }
       return;
     }
-
-    // Initialize first
-    await this.initialize();
 
     this.isRunning = true;
 

@@ -85,12 +85,17 @@ export class HourlyVolumeService {
       await this.initialize();
     }
 
+    // Check if we have data to serve immediately
+    if (this.databaseService.isAvailable()) {
+      const recordCount = await this.databaseService.getHourlyRecordCount();
+      if (recordCount > 0) {
+        console.log(`[HourlyVolume] Ready to serve ${recordCount} cached hourly records`);
+      }
+    }
+
     console.log('[HourlyVolume] Starting scheduled refresh jobs...');
     console.log('[HourlyVolume] - Hourly refresh: :01 past each hour (24 queries/day)');
     console.log('[HourlyVolume] - 10-min refresh: every 10 minutes (144 queries/day)');
-
-    // Do initial backfill if needed
-    await this.refresh();
 
     // Schedule hourly refresh (at :01 past each hour)
     this.scheduleHourlyRefresh();
@@ -99,6 +104,16 @@ export class HourlyVolumeService {
     this.scheduleTenMinRefresh();
 
     console.log('[HourlyVolume] Scheduled refresh jobs started');
+
+    // Do initial refresh in background (non-blocking) if query ID is configured
+    if (config.dune.hourlyVolumeQueryId) {
+      console.log('[HourlyVolume] Starting background refresh...');
+      this.refresh().catch(err => {
+        console.error('[HourlyVolume] Background refresh failed:', err.message);
+      });
+    } else {
+      console.log('[HourlyVolume] No DUNE_HOURLY_VOLUME_QUERY_ID - serving existing DB data only');
+    }
   }
 
   /**

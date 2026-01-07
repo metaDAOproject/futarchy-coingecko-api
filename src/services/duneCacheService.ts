@@ -42,8 +42,8 @@ export class DuneCacheService {
   async start(): Promise<void> {
     console.log(`[DuneCache] Starting cache service with ${this.refreshIntervalMs / 1000}s refresh interval`);
     
-    // Do initial refresh
-    await this.refreshCache();
+    // Mark as initialized immediately - other services (10-min, hourly) handle real-time data
+    // DuneCacheService is now a fallback/supplementary cache
     this.isInitialized = true;
     
     // Set up the cron job to refresh every hour (or configured interval)
@@ -52,6 +52,13 @@ export class DuneCacheService {
     }, this.refreshIntervalMs);
     
     console.log(`[DuneCache] Cache service started, next refresh in ${this.refreshIntervalMs / 1000}s`);
+    
+    // Do initial refresh in background (non-blocking)
+    // Primary volume data comes from 10-min/hourly services with DB backing
+    console.log('[DuneCache] Starting background cache refresh...');
+    this.refreshCache().catch(err => {
+      console.error('[DuneCache] Background refresh failed:', err.message);
+    });
   }
 
   /**

@@ -496,16 +496,23 @@ export class DatabaseService {
   }
 
   /**
-   * Get total record count
+   * Get total daily volume record count
    */
   async getRecordCount(): Promise<number> {
+    return this.getDailyRecordCount();
+  }
+
+  /**
+   * Get total daily volume record count
+   */
+  async getDailyRecordCount(): Promise<number> {
     if (!this.pool || !this.isConnected) return 0;
 
     try {
       const result = await this.pool.query('SELECT COUNT(*) as count FROM daily_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting record count:', error.message);
+      console.error('[Database] Error getting daily record count:', error.message);
       return 0;
     }
   }

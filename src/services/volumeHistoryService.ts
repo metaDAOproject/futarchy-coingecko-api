@@ -75,16 +75,31 @@ export class VolumeHistoryService {
       await this.initialize();
     }
 
+    // Check if we have data to serve immediately
+    if (this.databaseService.isAvailable()) {
+      const recordCount = await this.databaseService.getDailyRecordCount();
+      if (recordCount > 0) {
+        console.log(`[VolumeHistory] Ready to serve ${recordCount} cached daily records`);
+      }
+    }
+
     console.log('[VolumeHistory] Starting scheduled daily refresh...');
     console.log('[VolumeHistory] - Daily refresh: 00:01 UTC (1 query/day)');
-    
-    // Do initial refresh/backfill
-    await this.refresh();
     
     // Schedule daily refresh at 00:01 UTC
     this.scheduleDailyRefresh();
 
     console.log('[VolumeHistory] Scheduled daily refresh started');
+
+    // Do initial refresh in background (non-blocking) if query ID is configured
+    if (config.dune.incrementalVolumeQueryId) {
+      console.log('[VolumeHistory] Starting background refresh...');
+      this.refresh().catch(err => {
+        console.error('[VolumeHistory] Background refresh failed:', err.message);
+      });
+    } else {
+      console.log('[VolumeHistory] No DUNE_INCREMENTAL_VOLUME_QUERY_ID - serving existing DB data only');
+    }
   }
 
   /**
