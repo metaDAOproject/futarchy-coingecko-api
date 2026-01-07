@@ -5,6 +5,10 @@ import { DuneService } from './services/duneService.js';
 import { DuneCacheService } from './services/duneCacheService.js';
 import { SolanaService } from './services/solanaService.js';
 import { LaunchpadService } from './services/launchpadService.js';
+import { DatabaseService } from './services/databaseService.js';
+import { VolumeHistoryService } from './services/volumeHistoryService.js';
+import { HourlyVolumeService } from './services/hourlyVolumeService.js';
+import { TenMinuteVolumeService } from './services/tenMinuteVolumeService.js';
 import { config } from './config.js';
 import type { CoinGeckoTicker } from './types/coingecko.js';
 import { PublicKey } from '@solana/web3.js';
@@ -20,6 +24,10 @@ let duneServiceInstance: DuneService | null = null;
 let duneCacheServiceInstance: DuneCacheService | null = null;
 let solanaServiceInstance: SolanaService | null = null;
 let launchpadServiceInstance: LaunchpadService | null = null;
+let databaseServiceInstance: DatabaseService | null = null;
+let volumeHistoryServiceInstance: VolumeHistoryService | null = null;
+let hourlyVolumeServiceInstance: HourlyVolumeService | null = null;
+let tenMinuteVolumeServiceInstance: TenMinuteVolumeService | null = null;
 
 function getFutarchyService(): FutarchyService {
   if (!futarchyServiceInstance) {
@@ -43,12 +51,56 @@ function getDuneService(): DuneService | null {
   return duneServiceInstance;
 }
 
+function getDatabaseService(): DatabaseService {
+  if (!databaseServiceInstance) {
+    databaseServiceInstance = new DatabaseService();
+  }
+  return databaseServiceInstance;
+}
+
+function getVolumeHistoryService(): VolumeHistoryService | null {
+  if (!volumeHistoryServiceInstance) {
+    const duneService = getDuneService();
+    const databaseService = getDatabaseService();
+    const futarchyService = getFutarchyService();
+    if (duneService) {
+      volumeHistoryServiceInstance = new VolumeHistoryService(databaseService, duneService, futarchyService);
+    }
+  }
+  return volumeHistoryServiceInstance;
+}
+
+function getHourlyVolumeService(): HourlyVolumeService | null {
+  if (!hourlyVolumeServiceInstance) {
+    const duneService = getDuneService();
+    const databaseService = getDatabaseService();
+    const futarchyService = getFutarchyService();
+    if (duneService) {
+      hourlyVolumeServiceInstance = new HourlyVolumeService(databaseService, duneService, futarchyService);
+    }
+  }
+  return hourlyVolumeServiceInstance;
+}
+
+function getTenMinuteVolumeService(): TenMinuteVolumeService | null {
+  if (!tenMinuteVolumeServiceInstance) {
+    const duneService = getDuneService();
+    const databaseService = getDatabaseService();
+    const futarchyService = getFutarchyService();
+    if (duneService) {
+      tenMinuteVolumeServiceInstance = new TenMinuteVolumeService(duneService, databaseService, futarchyService);
+    }
+  }
+  return tenMinuteVolumeServiceInstance;
+}
+
 function getDuneCacheService(): DuneCacheService | null {
   if (!duneCacheServiceInstance) {
     const duneService = getDuneService();
     const futarchyService = getFutarchyService();
+    const volumeHistoryService = getVolumeHistoryService();
     if (duneService) {
-      duneCacheServiceInstance = new DuneCacheService(duneService, futarchyService);
+      duneCacheServiceInstance = new DuneCacheService(duneService, futarchyService, volumeHistoryService || undefined);
     }
   }
   return duneCacheServiceInstance;
@@ -133,23 +185,84 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
     const futarchyService = getFutarchyService();
     const priceService = getPriceService();
     const duneCacheService = getDuneCacheService();
+    const tenMinuteVolumeService = getTenMinuteVolumeService();
+    const hourlyVolumeService = getHourlyVolumeService();
     
     // Fetch all DAOs with their pool data
     const allDaos = await futarchyService.getAllDaos();
     
-    // Get cached Dune metrics (already mapped to DAO address by the cache service)
+    // Create mapping from baseMint (token) to DAO address for later lookup
+    const tokenToDaoMap = new Map<string, string>();
+    for (const dao of allDaos) {
+      tokenToDaoMap.set(dao.baseMint.toString().toLowerCase(), dao.daoAddress.toString().toLowerCase());
+    }
+    
+    // Get 24h metrics - priority: 10-min (most accurate) > hourly > DuneCacheService
     let duneMetricsMap = new Map<string, { base_volume_24h: string; target_volume_24h: string; high_24h: string; low_24h: string }>();
-    if (duneCacheService) {
+    let volumeSource = 'none';
+    
+    // Try TenMinuteVolumeService first (most accurate rolling 24h, refreshed every 10 min)
+    if (tenMinuteVolumeService?.isInitialized && tenMinuteVolumeService.isDatabaseConnected()) {
+      const baseMints = allDaos.map(dao => dao.baseMint.toString());
+      const tenMinMetrics = await tenMinuteVolumeService.getRolling24hMetrics(baseMints);
+      
+      if (tenMinMetrics.size > 0) {
+        // Remap from token address to DAO address
+        for (const [tokenAddress, metrics] of tenMinMetrics.entries()) {
+          const daoAddress = tokenToDaoMap.get(tokenAddress.toLowerCase());
+          if (daoAddress) {
+            duneMetricsMap.set(daoAddress, {
+              base_volume_24h: String(metrics.base_volume_24h),
+              target_volume_24h: String(metrics.target_volume_24h),
+              high_24h: String(metrics.high_24h),
+              low_24h: String(metrics.low_24h),
+            });
+          }
+        }
+        volumeSource = '10-minute';
+        console.log(`[TenMinVolume] Using rolling 24h metrics for ${duneMetricsMap.size} DAOs`);
+      }
+    }
+    
+    // Fall back to HourlyVolumeService if 10-minute didn't provide data
+    if (duneMetricsMap.size === 0 && hourlyVolumeService?.isInitialized && hourlyVolumeService.isDatabaseConnected()) {
+      const baseMints = allDaos.map(dao => dao.baseMint.toString());
+      const hourlyMetrics = await hourlyVolumeService.getRolling24hMetrics(baseMints);
+      
+      if (hourlyMetrics.size > 0) {
+        for (const [tokenAddress, metrics] of hourlyMetrics.entries()) {
+          const daoAddress = tokenToDaoMap.get(tokenAddress.toLowerCase());
+          if (daoAddress) {
+            duneMetricsMap.set(daoAddress, {
+              base_volume_24h: metrics.base_volume_24h,
+              target_volume_24h: metrics.target_volume_24h,
+              high_24h: metrics.high_24h,
+              low_24h: metrics.low_24h,
+            });
+          }
+        }
+        volumeSource = 'hourly';
+        console.log(`[HourlyVolume] Using rolling 24h metrics for ${duneMetricsMap.size} DAOs`);
+      }
+    }
+    
+    // Fall back to DuneCacheService as last resort
+    if (duneMetricsMap.size === 0 && duneCacheService) {
       const cachedMetrics = duneCacheService.getPoolMetrics();
       if (cachedMetrics && cachedMetrics.size > 0) {
         const cacheStatus = duneCacheService.getCacheStatus();
         console.log(`[DuneCache] Using cached metrics (age: ${Math.round(cacheStatus.cacheAgeMs / 1000)}s, ${cachedMetrics.size} entries)`);
         duneMetricsMap = cachedMetrics;
+        volumeSource = 'dune-cache';
       } else {
         console.warn('[DuneCache] No cached metrics available yet');
       }
+    }
+    
+    if (duneMetricsMap.size === 0) {
+      console.warn('[Tickers] No volume metrics available - set DUNE_API_KEY and configure queries');
     } else {
-      console.warn('[DuneCache] Dune cache service not configured - set DUNE_API_KEY in environment');
+      console.log(`[Tickers] Using volume source: ${volumeSource}`);
     }
     
     // Generate tickers for all DAOs
@@ -341,8 +454,191 @@ app.get('/api/cache/status', (req: Request, res: Response) => {
     aggregateVolumeTokenCount: status.aggregateVolumeTokenCount,
     cacheAgeSeconds: Math.round(status.cacheAgeMs / 1000),
     isInitialized: status.isInitialized,
+    usingVolumeHistoryService: status.usingVolumeHistoryService,
     refreshIntervalSeconds: parseInt(process.env.DUNE_CACHE_REFRESH_INTERVAL || '3600'),
   });
+});
+
+// Volume history status endpoint
+app.get('/api/volume-history/status', async (req: Request, res: Response) => {
+  const volumeHistoryService = getVolumeHistoryService();
+  
+  if (!volumeHistoryService) {
+    return res.status(400).json({
+      error: 'Volume History service not configured',
+      message: 'DUNE_API_KEY environment variable is required',
+    });
+  }
+
+  const status = await volumeHistoryService.getStatus();
+  res.json({
+    isInitialized: status.isInitialized,
+    databaseConnected: status.databaseConnected,
+    latestDate: status.latestDate,
+    tokenCount: status.tokenCount,
+    recordCount: status.recordCount,
+    lastSyncTime: status.lastSyncTime?.toISOString() || null,
+    isRefreshing: status.isRefreshing,
+    incrementalQueryId: status.incrementalQueryId,
+    schedule: status.schedule,
+  });
+});
+
+// Force volume history refresh endpoint
+app.post('/api/volume-history/refresh', async (req: Request, res: Response) => {
+  const volumeHistoryService = getVolumeHistoryService();
+  
+  if (!volumeHistoryService) {
+    return res.status(400).json({
+      error: 'Volume History service not configured',
+      message: 'DUNE_API_KEY environment variable is required',
+    });
+  }
+
+  try {
+    const statusBefore = await volumeHistoryService.getStatus();
+    
+    if (statusBefore.isRefreshing) {
+      return res.json({
+        message: 'Refresh already in progress',
+        status: statusBefore,
+      });
+    }
+
+    // Start refresh in background
+    volumeHistoryService.forceRefresh();
+    
+    res.json({
+      message: 'Volume history refresh started',
+      statusBefore,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to trigger refresh',
+      message: error.message,
+    });
+  }
+});
+
+// Hourly volume status endpoint (for rolling 24h metrics)
+app.get('/api/hourly-volume/status', async (req: Request, res: Response) => {
+  const hourlyVolumeService = getHourlyVolumeService();
+  
+  if (!hourlyVolumeService) {
+    return res.status(400).json({
+      error: 'Hourly Volume service not configured',
+      message: 'DUNE_API_KEY and DUNE_HOURLY_VOLUME_QUERY_ID are required',
+    });
+  }
+
+  const status = await hourlyVolumeService.getStatus();
+  res.json({
+    isInitialized: status.isInitialized,
+    databaseConnected: status.databaseConnected,
+    latestHour: status.latestHour,
+    latestCompleteHour: status.latestCompleteHour,
+    tokenCount: status.tokenCount,
+    recordCount: status.recordCount,
+    lastRefreshTime: status.lastRefreshTime?.toISOString() || null,
+    isRefreshing: status.isRefreshing,
+    hourlyQueryId: status.hourlyQueryId,
+    schedule: status.schedule,
+  });
+});
+
+// Force hourly volume refresh endpoint
+app.post('/api/hourly-volume/refresh', async (req: Request, res: Response) => {
+  const hourlyVolumeService = getHourlyVolumeService();
+  
+  if (!hourlyVolumeService) {
+    return res.status(400).json({
+      error: 'Hourly Volume service not configured',
+      message: 'DUNE_API_KEY and DUNE_HOURLY_VOLUME_QUERY_ID are required',
+    });
+  }
+
+  try {
+    const statusBefore = await hourlyVolumeService.getStatus();
+    
+    if (statusBefore.isRefreshing) {
+      return res.json({
+        message: 'Refresh already in progress',
+        status: statusBefore,
+      });
+    }
+
+    // Start refresh in background
+    hourlyVolumeService.forceRefresh();
+    
+    res.json({
+      message: 'Hourly volume refresh started',
+      statusBefore,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to trigger refresh',
+      message: error.message,
+    });
+  }
+});
+
+// 10-Minute volume status endpoint (PRIMARY for rolling 24h metrics)
+app.get('/api/ten-minute-volume/status', async (req: Request, res: Response) => {
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  
+  if (!tenMinuteVolumeService) {
+    return res.status(400).json({
+      error: '10-Minute Volume service not configured',
+      message: 'DUNE_API_KEY and DUNE_TEN_MINUTE_VOLUME_QUERY_ID are required',
+    });
+  }
+
+  const status = tenMinuteVolumeService.getStatus();
+  res.json({
+    isInitialized: status.initialized,
+    isRunning: status.isRunning,
+    databaseConnected: status.databaseConnected,
+    lastRefreshTime: status.lastRefreshTime,
+    queryId: status.queryId,
+    refreshInProgress: status.refreshInProgress,
+    description: 'PRIMARY service for /api/tickers 24h volume (10-min granularity)',
+  });
+});
+
+// Force 10-minute volume refresh endpoint
+app.post('/api/ten-minute-volume/refresh', async (req: Request, res: Response) => {
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  
+  if (!tenMinuteVolumeService) {
+    return res.status(400).json({
+      error: '10-Minute Volume service not configured',
+      message: 'DUNE_API_KEY and DUNE_TEN_MINUTE_VOLUME_QUERY_ID are required',
+    });
+  }
+
+  try {
+    const statusBefore = tenMinuteVolumeService.getStatus();
+    
+    if (statusBefore.refreshInProgress) {
+      return res.json({
+        message: 'Refresh already in progress',
+        status: statusBefore,
+      });
+    }
+
+    // Start refresh in background (full 24h backfill)
+    tenMinuteVolumeService.forceRefresh();
+    
+    res.json({
+      message: '10-minute volume refresh started (full 24h backfill)',
+      statusBefore,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to trigger refresh',
+      message: error.message,
+    });
+  }
 });
 
 // Force cache refresh endpoint (admin/debug use)
@@ -760,6 +1056,48 @@ const server = app.listen(config.server.port, async () => {
   console.log(`📊 Tickers: http://localhost:${config.server.port}/api/tickers`);
   console.log(`📈 Health: http://localhost:${config.server.port}/health`);
   
+  // Start the Volume History service (handles DB storage and incremental Dune fetching for historical data)
+  const volumeHistoryService = getVolumeHistoryService();
+  if (volumeHistoryService) {
+    console.log('🗄️ Starting Volume History service...');
+    try {
+      await volumeHistoryService.start();
+      console.log('✅ Volume History service started successfully');
+    } catch (error) {
+      console.error('❌ Failed to start Volume History service:', error);
+    }
+  } else {
+    console.log('ℹ️ Volume History service not available - requires DUNE_API_KEY');
+  }
+  
+  // Start the Hourly Volume service (handles hourly aggregates, fallback for rolling 24h)
+  const hourlyVolumeService = getHourlyVolumeService();
+  if (hourlyVolumeService) {
+    console.log('⏰ Starting Hourly Volume service...');
+    try {
+      await hourlyVolumeService.start();
+      console.log('✅ Hourly Volume service started successfully');
+    } catch (error) {
+      console.error('❌ Failed to start Hourly Volume service:', error);
+    }
+  } else {
+    console.log('ℹ️ Hourly Volume service not available - requires DUNE_API_KEY and DUNE_HOURLY_VOLUME_QUERY_ID');
+  }
+  
+  // Start the 10-Minute Volume service (PRIMARY for /api/tickers rolling 24h metrics)
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  if (tenMinuteVolumeService) {
+    console.log('📊 Starting 10-Minute Volume service (PRIMARY for /api/tickers)...');
+    try {
+      await tenMinuteVolumeService.start();
+      console.log('✅ 10-Minute Volume service started successfully');
+    } catch (error) {
+      console.error('❌ Failed to start 10-Minute Volume service:', error);
+    }
+  } else {
+    console.log('ℹ️ 10-Minute Volume service not available - requires DUNE_API_KEY and DUNE_TEN_MINUTE_VOLUME_QUERY_ID');
+  }
+  
   // Start the Dune cache service with hourly refresh
   const duneCacheService = getDuneCacheService();
   if (duneCacheService) {
@@ -783,11 +1121,27 @@ server.headersTimeout = config.server.keepAliveTimeout + 1000;
 console.log(`⏱️ Server timeouts configured: request=${config.server.requestTimeout}ms, keepAlive=${config.server.keepAliveTimeout}ms`);
 
 // Graceful shutdown
-process.on('SIGTERM', () => {
+process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully...');
   const duneCacheService = getDuneCacheService();
   if (duneCacheService) {
     duneCacheService.stop();
+  }
+  const volumeHistoryService = getVolumeHistoryService();
+  if (volumeHistoryService) {
+    volumeHistoryService.stop();
+  }
+  const hourlyVolumeService = getHourlyVolumeService();
+  if (hourlyVolumeService) {
+    hourlyVolumeService.stop();
+  }
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  if (tenMinuteVolumeService) {
+    tenMinuteVolumeService.stop();
+  }
+  const databaseService = getDatabaseService();
+  if (databaseService) {
+    await databaseService.close();
   }
   server.close(() => {
     console.log('Server closed');
@@ -795,11 +1149,27 @@ process.on('SIGTERM', () => {
   });
 });
 
-process.on('SIGINT', () => {
+process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully...');
   const duneCacheService = getDuneCacheService();
   if (duneCacheService) {
     duneCacheService.stop();
+  }
+  const volumeHistoryService = getVolumeHistoryService();
+  if (volumeHistoryService) {
+    volumeHistoryService.stop();
+  }
+  const hourlyVolumeService = getHourlyVolumeService();
+  if (hourlyVolumeService) {
+    hourlyVolumeService.stop();
+  }
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  if (tenMinuteVolumeService) {
+    tenMinuteVolumeService.stop();
+  }
+  const databaseService = getDatabaseService();
+  if (databaseService) {
+    await databaseService.close();
   }
   server.close(() => {
     console.log('Server closed');

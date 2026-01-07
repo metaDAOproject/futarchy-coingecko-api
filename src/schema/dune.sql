@@ -65,8 +65,8 @@ token_filtered AS (
 -- Final aggregation with pre-calculated values
 SELECT
     token,
-    CAST(SUM(CASE WHEN swap_type = 'buy' THEN input_amount ELSE output_amount END) AS VARCHAR) AS base_volume_24h,
-    CAST(SUM(CASE WHEN swap_type = 'buy' THEN output_amount ELSE input_amount END) AS VARCHAR) AS target_volume_24h,
+    CAST(SUM(CASE WHEN swap_type = 'buy' THEN output_amount ELSE input_amount END) AS VARCHAR) AS base_volume_24h,
+    CAST(SUM(CASE WHEN swap_type = 'buy' THEN input_amount ELSE output_amount END) AS VARCHAR) AS target_volume_24h,
     CAST(MAX(price) AS VARCHAR) AS high_24h,
     CAST(MIN(price) AS VARCHAR) AS low_24h
 FROM token_filtered

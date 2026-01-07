@@ -1,9 +1,16 @@
--- Aggregate Volume Query with Daily Breakdown
--- Query ID: 6422948
--- Returns daily volume data for each token, grouped by token and date
+-- Incremental Volume Query with start_date Parameter
+-- Fork of Query ID: 6422948
+-- Returns daily volume data for each token, starting from a specified date
+-- 
 -- Parameters:
---   {{since_start}}: true = all history since 2025-10-09, false = last 24 hours
+--   {{start_date}}: Start date for data fetch (format: YYYY-MM-DD, e.g., '2025-10-09')
 --   {{token_list}}: comma-separated token addresses in format 'token1', 'token2'
+--                   Use '__ALL__' to fetch all tokens (required - can't be empty)
+--
+-- Usage:
+--   - For full backfill: start_date = '2025-10-09', token_list = '__ALL__'
+--   - For incremental: start_date = last fetched date (e.g., '2026-01-05')
+--   - For specific tokens: token_list = 'token1', 'token2', 'token3'
 
 WITH filtered_and_extracted AS (
     -- Combine filtering and extraction in one pass to reduce I/O
@@ -32,8 +39,8 @@ WITH filtered_and_extracted AS (
         END AS quote_mint
     FROM solana.instruction_calls
     WHERE 
-        -- Most selective filters first (reduce cardinality early)
-        block_time >= TIMESTAMP '2025-10-09'
+        -- Use parameterized start_date for incremental fetching
+        block_time >= TIMESTAMP '{{start_date}}'
         AND tx_success = true
         AND executing_account = 'FUTARELBfJfQ8RDGhg1wdhddq1odMAJUePHFuBYfUxKq'
         AND inner_executing_account = 'FUTARELBfJfQ8RDGhg1wdhddq1odMAJUePHFuBYfUxKq'
@@ -64,7 +71,8 @@ token_filtered AS (
     FROM filtered_and_extracted
     WHERE 
         -- Apply token filter early
-        (COALESCE({{token_list}}, '') = '' OR token IN ({{token_list}}))
+        -- When '__ALL__' is in the list, return all tokens; otherwise filter by token_list
+        ('__ALL__' IN ({{token_list}}) OR token IN ({{token_list}}))
         -- Data quality filters
         AND swap_type IN ('buy', 'sell')
         AND input_amount > 0
@@ -83,3 +91,4 @@ FROM token_filtered
 WHERE price IS NOT NULL AND price > 0
 GROUP BY token, trading_date
 ORDER BY token ASC, trading_date ASC;
+

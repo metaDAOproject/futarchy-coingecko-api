@@ -1,5 +1,6 @@
 import { DuneService, DunePoolMetrics, DuneAggregateVolumeResponse } from './duneService.js';
 import { FutarchyService } from './futarchyService.js';
+import { VolumeHistoryService } from './volumeHistoryService.js';
 
 export interface CachedDuneData {
   poolMetrics: Map<string, DunePoolMetrics>;
@@ -11,14 +12,16 @@ export interface CachedDuneData {
 export class DuneCacheService {
   private duneService: DuneService;
   private futarchyService: FutarchyService;
+  private volumeHistoryService: VolumeHistoryService | null = null;
   private cache: CachedDuneData;
   private refreshInterval: ReturnType<typeof setInterval> | null = null;
   private refreshIntervalMs: number;
   private isInitialized: boolean = false;
 
-  constructor(duneService: DuneService, futarchyService: FutarchyService) {
+  constructor(duneService: DuneService, futarchyService: FutarchyService, volumeHistoryService?: VolumeHistoryService) {
     this.duneService = duneService;
     this.futarchyService = futarchyService;
+    this.volumeHistoryService = volumeHistoryService || null;
     
     // Default to 1 hour refresh interval, configurable via environment
     this.refreshIntervalMs = parseInt(process.env.DUNE_CACHE_REFRESH_INTERVAL || '3600') * 1000;
@@ -109,10 +112,21 @@ export class DuneCacheService {
       }
 
       // Refresh aggregate volume data
+      // Use VolumeHistoryService if available (it handles DB storage and incremental fetching)
       try {
-        const aggregateVolume = await this.duneService.getAggregateVolume(baseMintAddresses, true);
+        let aggregateVolume: DuneAggregateVolumeResponse;
+        
+        if (this.volumeHistoryService) {
+          // VolumeHistoryService handles DB storage, incremental fetching, and caching
+          aggregateVolume = await this.volumeHistoryService.getAggregateVolume(baseMintAddresses);
+          console.log(`[DuneCache] Got aggregate volume from VolumeHistoryService for ${aggregateVolume.tokens.length} tokens`);
+        } else {
+          // Fall back to direct Dune query (no DB storage)
+          aggregateVolume = await this.duneService.getAggregateVolume(baseMintAddresses, true);
+          console.log(`[DuneCache] Got aggregate volume from Dune for ${aggregateVolume.tokens.length} tokens`);
+        }
+        
         this.cache.aggregateVolume = aggregateVolume;
-        console.log(`[DuneCache] Refreshed aggregate volume for ${aggregateVolume.tokens.length} tokens`);
       } catch (error: any) {
         console.error('[DuneCache] Error refreshing aggregate volume:', error.message);
         // Keep existing cache on error
@@ -165,6 +179,7 @@ export class DuneCacheService {
     aggregateVolumeTokenCount: number;
     cacheAgeMs: number;
     isInitialized: boolean;
+    usingVolumeHistoryService: boolean;
   } {
     return {
       lastUpdated: this.cache.lastUpdated,
@@ -173,7 +188,15 @@ export class DuneCacheService {
       aggregateVolumeTokenCount: this.cache.aggregateVolume?.tokens.length || 0,
       cacheAgeMs: Date.now() - this.cache.lastUpdated.getTime(),
       isInitialized: this.isInitialized,
+      usingVolumeHistoryService: this.volumeHistoryService !== null,
     };
+  }
+
+  /**
+   * Get VolumeHistoryService for direct access (e.g., for status endpoint)
+   */
+  getVolumeHistoryService(): VolumeHistoryService | null {
+    return this.volumeHistoryService;
   }
 
   /**

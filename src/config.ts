@@ -43,5 +43,20 @@ export const config = {
     apiKey: process.env.DUNE_API_KEY || '',
     queryId: process.env.DUNE_QUERY_ID ? parseInt(process.env.DUNE_QUERY_ID) : undefined,
     aggregateVolumeQueryId: process.env.DUNE_AGGREGATE_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_AGGREGATE_VOLUME_QUERY_ID) : 6422948,
+    // Incremental query ID for fetching daily data from a specific start_date
+    incrementalVolumeQueryId: process.env.DUNE_INCREMENTAL_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_INCREMENTAL_VOLUME_QUERY_ID) : undefined,
+    // Hourly query ID for rolling 24h metrics (refreshed every ~10 min)
+    hourlyVolumeQueryId: process.env.DUNE_HOURLY_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_HOURLY_VOLUME_QUERY_ID) : undefined,
+    tenMinuteVolumeQueryId: process.env.DUNE_TEN_MINUTE_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_TEN_MINUTE_VOLUME_QUERY_ID) : undefined,
+  },
+  database: {
+    // PostgreSQL connection - can use either connection string or individual params
+    connectionString: process.env.DATABASE_URL || '',
+    host: process.env.DATABASE_HOST || '',
+    port: parseInt(process.env.DATABASE_PORT || '5432'),
+    database: process.env.DATABASE_NAME || 'futarchy_volumes',
+    user: process.env.DATABASE_USER || '',
+    password: process.env.DATABASE_PASSWORD || '',
+    ssl: process.env.DATABASE_SSL === 'true',
   },
 };
