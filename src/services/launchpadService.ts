@@ -1,7 +1,7 @@
 import { Connection, PublicKey, Keypair } from '@solana/web3.js';
 import { AnchorProvider, Wallet, Program } from '@coral-xyz/anchor';
 import { 
-  LaunchpadClient, 
+  LaunchpadClient as LaunchpadClientV06, 
   FutarchyClient, 
   getLaunchSignerAddr, 
   getPerformancePackageAddr, 
@@ -9,14 +9,32 @@ import {
   DAMM_V2_PROGRAM_ID,
   MAINNET_METEORA_CONFIG,
 } from "@metadaoproject/futarchy/v0.6";
-import { getAccount } from '@solana/spl-token';
+import { 
+  LaunchpadClient as LaunchpadClientV07,
+} from "@metadaoproject/futarchy/v0.7";
+import { getAccount, getAssociatedTokenAddress } from '@solana/spl-token';
 import { config } from '../config.js';
 import BN from 'bn.js';
+
+// Launchpad version detection
+export type LaunchpadVersion = 'v0.6' | 'v0.7';
+
+/**
+ * Additional token recipient allocation (v0.7+ only)
+ */
+export interface AdditionalTokenAllocation {
+  recipient: PublicKey;
+  amount: BN;
+  claimed: boolean;
+  tokenAccountAddress?: PublicKey;
+}
 
 /**
  * Complete token allocation breakdown for launchpad tokens
  */
 export interface TokenAllocationBreakdown {
+  // Launchpad version used
+  version: LaunchpadVersion;
   // Team Performance Package - locked tokens for the team
   teamPerformancePackage: {
     amount: BN;
@@ -33,10 +51,14 @@ export interface TokenAllocationBreakdown {
     poolAddress?: PublicKey;
     vaultAddress?: PublicKey;
   };
+  // Additional token recipient (v0.7+ only) - not in circulating supply
+  additionalTokenAllocation?: AdditionalTokenAllocation;
   // DAO address (if launch completed)
   daoAddress?: PublicKey;
   // Launch address
   launchAddress?: PublicKey;
+  // Total non-circulating supply (performance package + additional tokens if unclaimed)
+  totalNonCirculating: BN;
 }
 
 export interface LaunchData {
@@ -46,6 +68,11 @@ export interface LaunchData {
   performancePackageTokenAmount: BN;
   state: LaunchState;
   dao?: PublicKey;
+  // v0.7+ fields
+  version: LaunchpadVersion;
+  additionalTokensAmount?: BN;
+  additionalTokensRecipient?: PublicKey;
+  additionalTokensClaimed?: boolean;
 }
 
 export type LaunchState = 
@@ -71,7 +98,8 @@ export type PerformancePackageState =
 
 export class LaunchpadService {
   private connection: Connection;
-  private client: LaunchpadClient;
+  private clientV06: LaunchpadClientV06;
+  private clientV07: LaunchpadClientV07;
   private futarchyClient: FutarchyClient;
   private cache: Map<string, { data: any; timestamp: number }>;
 
@@ -91,9 +119,22 @@ export class LaunchpadService {
     const provider = new AnchorProvider(this.connection, wallet, {
       commitment: 'confirmed',
     });
-    this.client = LaunchpadClient.createClient({ provider });
+    this.clientV06 = LaunchpadClientV06.createClient({ provider });
+    this.clientV07 = LaunchpadClientV07.createClient({ provider });
     this.futarchyClient = FutarchyClient.createClient({ provider });
     this.cache = new Map();
+  }
+
+  /**
+   * Detect the launchpad version for a launch based on account fields.
+   * v0.7 launches have additionalTokensAmount field.
+   */
+  private detectLaunchVersion(launch: any): LaunchpadVersion {
+    // v0.7 has additionalTokensAmount and additionalTokensRecipient fields
+    if ('additionalTokensAmount' in launch || 'additionalTokensRecipient' in launch) {
+      return 'v0.7';
+    }
+    return 'v0.6';
   }
 
   private getCached<T>(key: string, ttl: number): T | null {
@@ -109,14 +150,54 @@ export class LaunchpadService {
   }
 
   /**
+   * Get the Launch PDA address for a given base mint (v0.6 program)
+   */
+  getLaunchAddressV06(baseMint: PublicKey): PublicKey {
+    return this.clientV06.getLaunchAddress({ baseMint });
+  }
+
+  /**
+   * Get the Launch PDA address for a given base mint (v0.7 program)
+   */
+  getLaunchAddressV07(baseMint: PublicKey): PublicKey {
+    return this.clientV07.getLaunchAddress({ baseMint });
+  }
+
+  /**
    * Get the Launch PDA address for a given base mint
+   * @deprecated Use getLaunchAddressV06 or getLaunchAddressV07 depending on which program was used
    */
   getLaunchAddress(baseMint: PublicKey): PublicKey {
-    return this.client.getLaunchAddress({ baseMint });
+    // Default to v0.6 for backwards compatibility
+    return this.getLaunchAddressV06(baseMint);
+  }
+
+  /**
+   * Fetch a Launch account by its address from the specified program
+   */
+  private async fetchLaunchFromProgram(
+    launchAddress: PublicKey, 
+    version: LaunchpadVersion
+  ): Promise<{ launch: any; version: LaunchpadVersion } | null> {
+    try {
+      const client = version === 'v0.7' ? this.clientV07 : this.clientV06;
+      const launch = await client.fetchLaunch(launchAddress);
+      if (launch) {
+        console.log(`[Launchpad] Found launch in ${version} program at ${launchAddress.toString()}`);
+        return { launch, version };
+      }
+    } catch (error: any) {
+      // Log the error for debugging but don't fail - the launch might be on the other program
+      if (!error.message?.includes('Account does not exist')) {
+        console.log(`[Launchpad] Error fetching ${version} launch at ${launchAddress.toString()}: ${error.message}`);
+      }
+    }
+    return null;
   }
 
   /**
    * Fetch a Launch account by its address
+   * Tries v0.7 first, falls back to v0.6 for older launches
    */
   async getLaunch(launchAddress: PublicKey): Promise<LaunchData | null> {
     const cacheKey = `launch_${launchAddress.toString()}`;
@@ -124,10 +205,17 @@ export class LaunchpadService {
     if (cached) return cached;
 
     try {
-      const launch = await this.client.fetchLaunch(launchAddress);
-      if (!launch) {
+      // Try v0.7 first, then v0.6
+      let result = await this.fetchLaunchFromProgram(launchAddress, 'v0.7');
+      if (!result) {
+        result = await this.fetchLaunchFromProgram(launchAddress, 'v0.6');
+      }
+      
+      if (!result) {
         return null;
       }
+
+      const { launch, version } = result;
 
       const launchData: LaunchData = {
         launchAddress,
@@ -136,6 +224,13 @@ export class LaunchpadService {
         performancePackageTokenAmount: new BN(launch.performancePackageTokenAmount.toString()),
         state: launch.state as LaunchState,
         dao: launch.dao || undefined,
+        version,
+        // v0.7 specific fields
+        additionalTokensAmount: launch.additionalTokensAmount 
+          ? new BN(launch.additionalTokensAmount.toString()) 
+          : undefined,
+        additionalTokensRecipient: launch.additionalTokensRecipient || undefined,
+        additionalTokensClaimed: launch.additionalTokensClaimed || undefined,
       };
 
       this.setCache(cacheKey, launchData);
@@ -148,14 +243,58 @@ export class LaunchpadService {
 
   /**
    * Fetch a Launch account by the token's base mint address
+   * Tries v0.7 program first (newer launches), then falls back to v0.6
    */
   async getLaunchByBaseMint(baseMint: PublicKey): Promise<LaunchData | null> {
-    const launchAddress = this.getLaunchAddress(baseMint);
-    return this.getLaunch(launchAddress);
+    const cacheKey = `launch_by_mint_${baseMint.toString()}`;
+    const cached = this.getCached<LaunchData>(cacheKey, config.cache.tickersTTL * 10);
+    if (cached) return cached;
+
+    // Try v0.7 program first (newer launches)
+    const launchAddressV07 = this.getLaunchAddressV07(baseMint);
+    console.log(`[Launchpad] Checking v0.7 launch at ${launchAddressV07.toString()} for mint ${baseMint.toString()}`);
+    let launch = await this.fetchLaunchFromProgram(launchAddressV07, 'v0.7');
+    
+    // If not found in v0.7, try v0.6
+    if (!launch) {
+      const launchAddressV06 = this.getLaunchAddressV06(baseMint);
+      console.log(`[Launchpad] v0.7 not found, checking v0.6 launch at ${launchAddressV06.toString()}`);
+      launch = await this.fetchLaunchFromProgram(launchAddressV06, 'v0.6');
+    }
+
+    if (!launch) {
+      console.log(`[Launchpad] No launch found for mint ${baseMint.toString()}`);
+      return null;
+    }
+
+    console.log(`[Launchpad] Found ${launch.version} launch for mint ${baseMint.toString()}`);
+    
+
+    const { launch: launchAccount, version } = launch;
+    const launchAddress = version === 'v0.7' ? launchAddressV07 : this.getLaunchAddressV06(baseMint);
+
+    const launchData: LaunchData = {
+      launchAddress,
+      baseMint: launchAccount.baseMint,
+      performancePackageGrantee: launchAccount.performancePackageGrantee,
+      performancePackageTokenAmount: new BN(launchAccount.performancePackageTokenAmount.toString()),
+      state: launchAccount.state as LaunchState,
+      dao: launchAccount.dao || undefined,
+      version,
+      // v0.7 specific fields
+      additionalTokensAmount: launchAccount.additionalTokensAmount 
+        ? new BN(launchAccount.additionalTokensAmount.toString()) 
+        : undefined,
+      additionalTokensRecipient: launchAccount.additionalTokensRecipient || undefined,
+      additionalTokensClaimed: launchAccount.additionalTokensClaimed || undefined,
+    };
+
+    this.setCache(cacheKey, launchData);
+    return launchData;
   }
 
   /**
-   * Fetch all Launch accounts
+   * Fetch all Launch accounts from both v0.6 and v0.7 programs
    */
   async getAllLaunches(): Promise<LaunchData[]> {
     const cacheKey = 'all_launches';
@@ -163,20 +302,56 @@ export class LaunchpadService {
     if (cached) return cached;
 
     try {
-      // Fetch all launch accounts from the program
-      const launchAccounts = await this.client.launchpad.account.launch.all();
-      
       const launches: LaunchData[] = [];
-      for (const account of launchAccounts) {
-        const launch = account.account;
-        launches.push({
-          launchAddress: account.publicKey,
-          baseMint: launch.baseMint,
-          performancePackageGrantee: launch.performancePackageGrantee,
-          performancePackageTokenAmount: new BN(launch.performancePackageTokenAmount.toString()),
-          state: launch.state as LaunchState,
-          dao: launch.dao || undefined,
-        });
+      const seenAddresses = new Set<string>();
+
+      // Fetch from v0.7 program first (includes all fields)
+      try {
+        const v07Accounts = await this.clientV07.launchpad.account.launch.all();
+        for (const account of v07Accounts) {
+          const launch = account.account;
+          const version = this.detectLaunchVersion(launch);
+          seenAddresses.add(account.publicKey.toString());
+          launches.push({
+            launchAddress: account.publicKey,
+            baseMint: launch.baseMint,
+            performancePackageGrantee: launch.performancePackageGrantee,
+            performancePackageTokenAmount: new BN(launch.performancePackageTokenAmount.toString()),
+            state: launch.state as LaunchState,
+            dao: launch.dao || undefined,
+            version,
+            additionalTokensAmount: (launch as any).additionalTokensAmount 
+              ? new BN((launch as any).additionalTokensAmount.toString()) 
+              : undefined,
+            additionalTokensRecipient: (launch as any).additionalTokensRecipient || undefined,
+            additionalTokensClaimed: (launch as any).additionalTokensClaimed || undefined,
+          });
+        }
+      } catch (error) {
+        console.warn('[Launchpad] Error fetching v0.7 launches:', error);
+      }
+
+      // Fetch from v0.6 program (older launches)
+      try {
+        const v06Accounts = await this.clientV06.launchpad.account.launch.all();
+        for (const account of v06Accounts) {
+          // Skip if already seen from v0.7
+          if (seenAddresses.has(account.publicKey.toString())) {
+            continue;
+          }
+          const launch = account.account;
+          launches.push({
+            launchAddress: account.publicKey,
+            baseMint: launch.baseMint,
+            performancePackageGrantee: launch.performancePackageGrantee,
+            performancePackageTokenAmount: new BN(launch.performancePackageTokenAmount.toString()),
+            state: launch.state as LaunchState,
+            dao: launch.dao || undefined,
+            version: 'v0.6',
+          });
+        }
+      } catch (error) {
+        console.warn('[Launchpad] Error fetching v0.6 launches:', error);
       }
 
       this.setCache(cacheKey, launches);
@@ -196,7 +371,11 @@ export class LaunchpadService {
     if (cached) return cached;
 
     try {
-      const pkg = await this.client.priceBasedUnlock.getPerformancePackage(performancePackageAddress);
+      // Try v0.7 first, then v0.6
+      let pkg = await this.clientV07.priceBasedUnlock.getPerformancePackage(performancePackageAddress);
+      if (!pkg) {
+        pkg = await this.clientV06.priceBasedUnlock.getPerformancePackage(performancePackageAddress);
+      }
       if (!pkg) {
         return null;
       }
@@ -219,12 +398,12 @@ export class LaunchpadService {
   }
 
   /**
-   * Derive the performance package address for a given launch.
+   * Derive the performance package address for a given launch (v0.6 style).
    * The createKey used during completeLaunch is the launch signer.
    */
-  getPerformancePackageAddress(launchAddress: PublicKey): PublicKey {
+  getPerformancePackageAddressV06(launchAddress: PublicKey): PublicKey {
     const [launchSigner] = getLaunchSignerAddr(
-      this.client.getProgramId(),
+      this.clientV06.getProgramId(),
       launchAddress
     );
     const [performancePackageAddress] = getPerformancePackageAddr({
@@ -232,6 +411,24 @@ export class LaunchpadService {
       createKey: launchSigner,
     });
     return performancePackageAddress;
+  }
+
+  /**
+   * Derive the performance package address for a given launch (v0.7 style).
+   * Uses the launch-specific PDA derivation.
+   */
+  getPerformancePackageAddressV07(launchAddress: PublicKey): PublicKey {
+    return this.clientV07.getLaunchPerformancePackageAddress({ launch: launchAddress });
+  }
+
+  /**
+   * Get performance package address for a launch, detecting version automatically.
+   */
+  getPerformancePackageAddress(launchAddress: PublicKey, version: LaunchpadVersion = 'v0.6'): PublicKey {
+    if (version === 'v0.7') {
+      return this.getPerformancePackageAddressV07(launchAddress);
+    }
+    return this.getPerformancePackageAddressV06(launchAddress);
   }
 
   /**
@@ -343,8 +540,9 @@ export class LaunchpadService {
    * - Team Performance Package (locked)
    * - FutarchyAMM Liquidity (internal AMM)
    * - Meteora LP Liquidity (external DEX)
+   * - Additional Token Allocation (v0.7+ only, not in circulating supply until claimed)
    * 
-   * Circulating Supply = Total - Team - FutarchyAMM - Meteora
+   * Circulating Supply = Total - Team - FutarchyAMM - Meteora - AdditionalTokens (if unclaimed)
    */
   async getTokenAllocationBreakdown(baseMint: PublicKey): Promise<TokenAllocationBreakdown> {
     const cacheKey = `allocation_${baseMint.toString()}`;
@@ -352,9 +550,11 @@ export class LaunchpadService {
     if (cached) return cached;
 
     const emptyBreakdown: TokenAllocationBreakdown = {
+      version: 'v0.6',
       teamPerformancePackage: { amount: new BN(0) },
       futarchyAmmLiquidity: { amount: new BN(0) },
       meteoraLpLiquidity: { amount: new BN(0) },
+      totalNonCirculating: new BN(0),
     };
 
     try {
@@ -368,6 +568,7 @@ export class LaunchpadService {
         // Launch not yet completed
         return {
           ...emptyBreakdown,
+          version: launch.version,
           launchAddress: launch.launchAddress,
         };
       }
@@ -376,8 +577,11 @@ export class LaunchpadService {
       const dao = await this.futarchyClient.fetchDao(launch.dao);
       const quoteMint = dao?.quoteMint;
 
-      // Derive the performance package address
-      const performancePackageAddress = this.getPerformancePackageAddress(launch.launchAddress);
+      // Derive the performance package address based on version
+      const performancePackageAddress = this.getPerformancePackageAddress(
+        launch.launchAddress, 
+        launch.version
+      );
 
       // Get FutarchyAMM liquidity
       const futarchyAmm = await this.getFutarchyAmmLiquidity(launch.dao);
@@ -388,7 +592,38 @@ export class LaunchpadService {
         meteoraLp = await this.getMeteoraLpLiquidity(baseMint, quoteMint);
       }
 
+      // Handle additional token allocation (v0.7+ only)
+      let additionalTokenAllocation: AdditionalTokenAllocation | undefined;
+      if (launch.version === 'v0.7' && launch.additionalTokensRecipient && launch.additionalTokensAmount) {
+        // Get the token account address for the additional tokens recipient
+        let tokenAccountAddress: PublicKey | undefined;
+        try {
+          tokenAccountAddress = await getAssociatedTokenAddress(
+            baseMint,
+            launch.additionalTokensRecipient
+          );
+        } catch (error) {
+          console.warn(`[Launchpad] Could not derive additional tokens account for ${launch.additionalTokensRecipient.toString()}`);
+        }
+
+        additionalTokenAllocation = {
+          recipient: launch.additionalTokensRecipient,
+          amount: launch.additionalTokensAmount,
+          claimed: launch.additionalTokensClaimed || false,
+          tokenAccountAddress,
+        };
+      }
+
+      // Calculate total non-circulating supply
+      let totalNonCirculating = launch.performancePackageTokenAmount;
+      
+      // Add additional tokens if not yet claimed (they're still locked)
+      if (additionalTokenAllocation && !additionalTokenAllocation.claimed) {
+        totalNonCirculating = totalNonCirculating.add(additionalTokenAllocation.amount);
+      }
+
       const breakdown: TokenAllocationBreakdown = {
+        version: launch.version,
         teamPerformancePackage: {
           amount: launch.performancePackageTokenAmount,
           address: performancePackageAddress,
@@ -402,8 +637,10 @@ export class LaunchpadService {
           poolAddress: meteoraLp.poolAddress,
           vaultAddress: meteoraLp.vaultAddress,
         },
+        additionalTokenAllocation,
         daoAddress: launch.dao,
         launchAddress: launch.launchAddress,
+        totalNonCirculating,
       };
 
       this.setCache(cacheKey, breakdown);
@@ -444,6 +681,7 @@ export class LaunchpadService {
 
   /**
    * Build a map of baseMint -> lockedAmount for all launched tokens
+   * Includes performance package + unclaimed additional tokens
    * More efficient when you need to check multiple tokens
    */
   async buildLockedAmountsMap(): Promise<Map<string, BN>> {
@@ -459,9 +697,18 @@ export class LaunchpadService {
       for (const launch of allLaunches) {
         // Only include completed launches (those with a DAO set)
         if (launch.dao) {
+          let totalLocked = launch.performancePackageTokenAmount;
+          
+          // Add unclaimed additional tokens (v0.7+ only)
+          if (launch.version === 'v0.7' && 
+              launch.additionalTokensAmount && 
+              !launch.additionalTokensClaimed) {
+            totalLocked = totalLocked.add(launch.additionalTokensAmount);
+          }
+          
           lockedAmountsMap.set(
             launch.baseMint.toString(),
-            launch.performancePackageTokenAmount
+            totalLocked
           );
         }
       }
@@ -471,6 +718,67 @@ export class LaunchpadService {
     } catch (error) {
       console.error('Error building locked amounts map:', error);
       return lockedAmountsMap;
+    }
+  }
+
+  /**
+   * Get detailed locked amounts breakdown including additional token allocations
+   */
+  async buildLockedAmountsDetailedMap(): Promise<Map<string, {
+    performancePackage: BN;
+    additionalTokens?: {
+      amount: BN;
+      recipient: PublicKey;
+      claimed: boolean;
+    };
+    totalLocked: BN;
+    version: LaunchpadVersion;
+  }>> {
+    const cacheKey = 'locked_amounts_detailed_map';
+    const cached = this.getCached<Map<string, any>>(cacheKey, config.cache.tickersTTL);
+    if (cached) return cached;
+
+    const detailedMap = new Map<string, any>();
+    
+    try {
+      const allLaunches = await this.getAllLaunches();
+      
+      for (const launch of allLaunches) {
+        // Only include completed launches (those with a DAO set)
+        if (launch.dao) {
+          let totalLocked = launch.performancePackageTokenAmount;
+          
+          const entry: any = {
+            performancePackage: launch.performancePackageTokenAmount,
+            version: launch.version,
+          };
+          
+          // Add additional tokens info (v0.7+ only)
+          if (launch.version === 'v0.7' && 
+              launch.additionalTokensAmount && 
+              launch.additionalTokensRecipient) {
+            entry.additionalTokens = {
+              amount: launch.additionalTokensAmount,
+              recipient: launch.additionalTokensRecipient,
+              claimed: launch.additionalTokensClaimed || false,
+            };
+            
+            // Only add to locked total if not claimed
+            if (!launch.additionalTokensClaimed) {
+              totalLocked = totalLocked.add(launch.additionalTokensAmount);
+            }
+          }
+          
+          entry.totalLocked = totalLocked;
+          detailedMap.set(launch.baseMint.toString(), entry);
+        }
+      }
+
+      this.setCache(cacheKey, detailedMap);
+      return detailedMap;
+    } catch (error) {
+      console.error('Error building detailed locked amounts map:', error);
+      return detailedMap;
     }
   }
 }

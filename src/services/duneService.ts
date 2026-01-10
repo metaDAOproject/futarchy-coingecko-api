@@ -78,6 +78,7 @@ export class DuneService {
   private batchCacheTTL: number = 300000; // 5 minutes cache for batch queries (Dune queries are heavy)
   private aggregateVolumeCacheTTL: number = 600000; // 10 minutes cache for aggregate volume (heavy historical query)
   private fetchTimeout: number = 240000; // 4 minutes timeout for Dune API calls
+  private devMode: boolean;
 
   constructor() {
     this.apiKey = config.dune.apiKey;
@@ -86,6 +87,11 @@ export class DuneService {
     this.cache = new Map();
     this.batchCache = new Map();
     this.aggregateVolumeCache = new Map();
+    this.devMode = config.devMode;
+    
+    if (this.devMode) {
+      console.log('[Dune] ⚠️  DEV_MODE enabled - external Dune API calls are disabled');
+    }
     // Allow configurable cache TTLs from environment
     if (process.env.DUNE_CACHE_TTL) {
       this.cacheTTL = parseInt(process.env.DUNE_CACHE_TTL) * 1000; // Convert seconds to milliseconds
@@ -99,6 +105,13 @@ export class DuneService {
     if (process.env.DUNE_FETCH_TIMEOUT) {
       this.fetchTimeout = parseInt(process.env.DUNE_FETCH_TIMEOUT) * 1000; // Convert seconds to milliseconds
     }
+  }
+
+  /**
+   * Check if dev mode is enabled
+   */
+  isDevMode(): boolean {
+    return this.devMode;
   }
 
   /**
@@ -310,6 +323,22 @@ ORDER BY base_volume_24h DESC;
    * @returns The query results
    */
   async executeRawQuery(sqlQuery: string, queryName: string = 'Temporary Query'): Promise<DuneQueryResult> {
+    // Skip external calls in dev mode
+    if (this.devMode) {
+      console.log(`[Dune] DEV_MODE: Skipping raw query execution (${queryName})`);
+      return {
+        rows: [],
+        metadata: {
+          column_names: [],
+          result_set_bytes: 0,
+          total_row_count: 0,
+          datapoint_count: 0,
+          pending_time_millis: 0,
+          execution_time_millis: 0,
+        }
+      };
+    }
+
     try {
       // If we have a queryId configured, try using fullQuery parameter first
       // This is more efficient and works with free tier
@@ -676,6 +705,12 @@ ORDER BY base_volume_24h DESC;
    * Fetch 24h metrics for a specific pool
    */
   async getPoolMetrics24h(poolId: string | PublicKey): Promise<DunePoolMetrics | null> {
+    // Skip external calls in dev mode
+    if (this.devMode) {
+      console.log('[Dune] DEV_MODE: Skipping pool metrics query');
+      return null;
+    }
+
     const poolIdStr = typeof poolId === 'string' ? poolId : poolId.toString();
     const cacheKey = `pool_metrics_24h_${poolIdStr}`;
     
@@ -732,6 +767,12 @@ ORDER BY base_volume_24h DESC;
    * @param tokenAddresses Optional list of token addresses to filter by
    */
   async getAllPoolsMetrics24h(tokenAddresses?: string[]): Promise<Map<string, DunePoolMetrics>> {
+    // Skip external calls in dev mode
+    if (this.devMode) {
+      console.log('[Dune] DEV_MODE: Skipping 24h metrics query');
+      return new Map();
+    }
+
     if (!this.apiKey) {
       console.warn('[Dune] API key not configured, skipping 24h metrics');
       return new Map();
@@ -856,6 +897,22 @@ ORDER BY base_volume_24h DESC;
     queryId: number,
     parameters?: Record<string, any>
   ): Promise<DuneQueryResult> {
+    // Skip external calls in dev mode
+    if (this.devMode) {
+      console.log(`[Dune] DEV_MODE: Skipping query ${queryId} execution`);
+      return {
+        rows: [],
+        metadata: {
+          column_names: [],
+          result_set_bytes: 0,
+          total_row_count: 0,
+          datapoint_count: 0,
+          pending_time_millis: 0,
+          execution_time_millis: 0,
+        }
+      };
+    }
+
     try {
       // Execute the query with parameters
       const executeResult = await this.executeQuery(queryId, parameters);
@@ -891,6 +948,20 @@ ORDER BY base_volume_24h DESC;
     tokenAddresses: string[],
     sinceStart: boolean = true
   ): Promise<DuneAggregateVolumeResponse> {
+    // Skip external calls in dev mode
+    if (this.devMode) {
+      console.log(`[Dune] DEV_MODE: Skipping aggregate volume query`);
+      return {
+        tokens: [],
+        query_metadata: {
+          since_start: sinceStart,
+          token_count: 0,
+          total_trading_days: 0,
+          execution_time_millis: 0,
+        }
+      };
+    }
+
     if (!this.apiKey) {
       throw new Error('Dune API key not configured');
     }

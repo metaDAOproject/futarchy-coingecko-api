@@ -660,7 +660,7 @@ app.get('/api/supply/:mintAddress', async (req: Request, res: Response) => {
       });
     }
 
-    // Get complete token allocation breakdown (team, futarchyAMM, meteora)
+    // Get complete token allocation breakdown (team, futarchyAMM, meteora, additionalTokens)
     const allocation = await launchpadService.getTokenAllocationBreakdown(
       new PublicKey(mintAddress)
     );
@@ -679,8 +679,16 @@ app.get('/api/supply/:mintAddress', async (req: Request, res: Response) => {
         poolAddress: allocation.meteoraLpLiquidity.poolAddress?.toString(),
         vaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
       },
+      // Include additional token allocation for v0.7 launches
+      additionalTokenAllocation: allocation.additionalTokenAllocation ? {
+        amount: allocation.additionalTokenAllocation.amount,
+        recipient: allocation.additionalTokenAllocation.recipient.toString(),
+        claimed: allocation.additionalTokenAllocation.claimed,
+        tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress?.toString(),
+      } : undefined,
       daoAddress: allocation.daoAddress?.toString(),
       launchAddress: allocation.launchAddress?.toString(),
+      version: allocation.version,
     });
 
     res.json({
@@ -742,11 +750,33 @@ app.get('/api/supply/:mintAddress/circulating', async (req: Request, res: Respon
       new PublicKey(mintAddress)
     );
 
-    // Only team performance package is excluded from circulating supply
-    // Liquidity (futarchyAMM and meteora) IS considered circulating
-    const lockedAmount = allocation.teamPerformancePackage.amount;
-
-    const circulatingSupply = await solanaService.getCirculatingSupply(mintAddress, lockedAmount);
+    // Use the full getSupplyInfo method which handles all allocations correctly
+    // including team performance package, additional tokens (v0.7), and special cases
+    const supplyInfo = await solanaService.getSupplyInfo(mintAddress, {
+      teamPerformancePackage: {
+        amount: allocation.teamPerformancePackage.amount,
+        address: allocation.teamPerformancePackage.address?.toString(),
+      },
+      futarchyAmmLiquidity: {
+        amount: allocation.futarchyAmmLiquidity.amount,
+        vaultAddress: allocation.futarchyAmmLiquidity.vaultAddress?.toString(),
+      },
+      meteoraLpLiquidity: {
+        amount: allocation.meteoraLpLiquidity.amount,
+        poolAddress: allocation.meteoraLpLiquidity.poolAddress?.toString(),
+        vaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
+      },
+      // Include additional token allocation for v0.7 launches
+      additionalTokenAllocation: allocation.additionalTokenAllocation ? {
+        amount: allocation.additionalTokenAllocation.amount,
+        recipient: allocation.additionalTokenAllocation.recipient.toString(),
+        claimed: allocation.additionalTokenAllocation.claimed,
+        tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress?.toString(),
+      } : undefined,
+      daoAddress: allocation.daoAddress?.toString(),
+      launchAddress: allocation.launchAddress?.toString(),
+      version: allocation.version,
+    });
 
     // Include allocation addresses in response
     const response: { 
@@ -756,24 +786,38 @@ app.get('/api/supply/:mintAddress/circulating', async (req: Request, res: Respon
         futarchyAmmVaultAddress?: string;
         meteoraPoolAddress?: string;
         meteoraVaultAddress?: string;
+        additionalTokenAllocation?: {
+          amount: string;
+          recipient: string;
+          claimed: boolean;
+        };
+        initialTokenAllocation?: {
+          amount: string;
+          claimed: boolean;
+        };
         daoAddress?: string;
         launchAddress?: string;
+        version?: string;
       };
     } = {
-      result: circulatingSupply,
+      result: supplyInfo.circulatingSupply,
     };
     
     // Add allocation details if any are present
     if (allocation.teamPerformancePackage.address || 
         allocation.futarchyAmmLiquidity.vaultAddress || 
-        allocation.meteoraLpLiquidity.poolAddress) {
+        allocation.meteoraLpLiquidity.poolAddress ||
+        allocation.additionalTokenAllocation) {
       response.allocation = {
         teamPerformancePackageAddress: allocation.teamPerformancePackage.address?.toString(),
         futarchyAmmVaultAddress: allocation.futarchyAmmLiquidity.vaultAddress?.toString(),
         meteoraPoolAddress: allocation.meteoraLpLiquidity.poolAddress?.toString(),
         meteoraVaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
+        additionalTokenAllocation: supplyInfo.allocation?.additionalTokenAllocation,
+        initialTokenAllocation: supplyInfo.allocation?.initialTokenAllocation,
         daoAddress: allocation.daoAddress?.toString(),
         launchAddress: allocation.launchAddress?.toString(),
+        version: allocation.version,
       };
     }
 

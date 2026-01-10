@@ -373,7 +373,7 @@ export class FutarchyService {
       // Fetch all DAO accounts with retry logic
       let daoAccounts: any[];
       try {
-        daoAccounts = await this.retryWithBackoff(() => this.client.autocrat.account.dao.all());
+        daoAccounts = await this.retryWithBackoff(() => this.client.futarchy.account.dao.all());
       } catch (error: any) {
         const isRateLimited = this.isRateLimitError(error);
         if (isRateLimited) {

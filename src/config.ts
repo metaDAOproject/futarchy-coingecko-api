@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 export const config = {
+  // Development mode - disables external Dune API calls
+  devMode: process.env.DEV_MODE === 'true',
   solana: {
     rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
     wsUrl: process.env.SOLANA_WS_URL || 'wss://api.mainnet-beta.solana.com',

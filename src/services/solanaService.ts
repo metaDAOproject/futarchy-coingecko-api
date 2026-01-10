@@ -27,10 +27,24 @@ export interface TokenSupplyInfo {
       poolAddress?: string;
       vaultAddress?: string;
     };
+    // Additional token allocation (v0.7+ only) - not in circulating supply
+    additionalTokenAllocation?: {
+      amount: string;
+      recipient: string;
+      claimed: boolean;
+      tokenAccountAddress?: string;
+    };
+    // Initial token allocation that has been claimed and IS in circulating supply
+    initialTokenAllocation?: {
+      amount: string;
+      claimed: boolean;
+    };
     // DAO address
     daoAddress?: string;
     // Launch address
     launchAddress?: string;
+    // Launchpad version
+    version?: string;
   };
 }
 
@@ -48,8 +62,16 @@ export interface TokenAllocationInput {
     poolAddress?: string;
     vaultAddress?: string;
   };
+  // Additional token allocation (v0.7+ only)
+  additionalTokenAllocation?: {
+    amount: BN;
+    recipient: string;
+    claimed: boolean;
+    tokenAccountAddress?: string;
+  };
   daoAddress?: string;
   launchAddress?: string;
+  version?: string;
 }
 
 export class SolanaService {
@@ -159,8 +181,9 @@ export class SolanaService {
    * @returns Promise<TokenSupplyInfo> - Complete supply information with allocation details
    */
   async getSupplyInfo(mintAddress: string, allocation?: TokenAllocationInput): Promise<TokenSupplyInfo> {
+    const additionalAmount = allocation?.additionalTokenAllocation?.amount || new BN(0);
     const cacheKey = allocation 
-      ? `supply_info_${mintAddress}_${allocation.teamPerformancePackage.amount}_${allocation.futarchyAmmLiquidity.amount}_${allocation.meteoraLpLiquidity.amount}`
+      ? `supply_info_${mintAddress}_${allocation.teamPerformancePackage.amount}_${allocation.futarchyAmmLiquidity.amount}_${allocation.meteoraLpLiquidity.amount}_${additionalAmount}`
       : `supply_info_${mintAddress}_none`;
     const cached = this.getCached<TokenSupplyInfo>(cacheKey, config.cache.tickersTTL);
     if (cached !== null) return cached;
@@ -184,10 +207,30 @@ export class SolanaService {
         const futarchyAmount = allocation.futarchyAmmLiquidity.amount;
         const meteoraAmount = allocation.meteoraLpLiquidity.amount;
 
-        // Only subtract team performance package from circulating supply
-        // Liquidity (futarchyAMM and meteora) IS considered circulating
+        // Subtract team performance package from circulating supply (always locked)
         if (teamAmount.gt(new BN(0))) {
           circulatingSupplyBN = circulatingSupplyBN.sub(teamAmount);
+        }
+
+        // Subtract additional token allocation from circulating supply (v0.7+ only)
+        // These tokens go to a specific recipient, not into general circulation
+        if (allocation.additionalTokenAllocation && 
+            allocation.additionalTokenAllocation.amount.gt(new BN(0))) {
+          circulatingSupplyBN = circulatingSupplyBN.sub(allocation.additionalTokenAllocation.amount);
+        }
+
+        // Special case: RNGR token has an initial token allocation that IS in circulation
+        // This is a claimed portion from the additional token recipient that should be added back
+        const RNGR_MINT = 'RNGRtJMbCveqCp7AC6U95KmrdKecFckaJZiWbPGmeta';
+        const RNGR_INITIAL_ALLOCATION = new BN(192187500000); // 192,187.5 tokens with 6 decimals
+        let initialTokenAllocationDetails: { amount: string; claimed: boolean } | undefined;
+        
+        if (mintAddress === RNGR_MINT) {
+          circulatingSupplyBN = circulatingSupplyBN.add(RNGR_INITIAL_ALLOCATION);
+          initialTokenAllocationDetails = {
+            amount: (Number(RNGR_INITIAL_ALLOCATION.toString()) / divisor).toString(),
+            claimed: true,
+          };
         }
 
         // Ensure we don't go negative
@@ -210,8 +253,18 @@ export class SolanaService {
             poolAddress: allocation.meteoraLpLiquidity.poolAddress,
             vaultAddress: allocation.meteoraLpLiquidity.vaultAddress,
           } : undefined,
+          // Include additional token allocation if present (v0.7+ only)
+          additionalTokenAllocation: allocation.additionalTokenAllocation ? {
+            amount: (Number(allocation.additionalTokenAllocation.amount.toString()) / divisor).toString(),
+            recipient: allocation.additionalTokenAllocation.recipient,
+            claimed: allocation.additionalTokenAllocation.claimed,
+            tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress,
+          } : undefined,
+          // Include initial token allocation if present (special cases)
+          initialTokenAllocation: initialTokenAllocationDetails,
           daoAddress: allocation.daoAddress,
           launchAddress: allocation.launchAddress,
+          version: allocation.version,
         };
       }
       
