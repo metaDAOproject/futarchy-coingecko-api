@@ -831,6 +831,72 @@ app.get('/api/supply/:mintAddress/circulating', async (req: Request, res: Respon
   }
 });
 
+// Jupiter-compatible circulating supply endpoint
+app.get('/api/supply/:mintAddress/jupiter/circulating', async (req: Request, res: Response) => {
+  try {
+    const mintAddress = req.params.mintAddress;
+    const solanaService = getSolanaService();
+    const launchpadService = getLaunchpadService();
+
+    if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
+      return res.status(400).json({ error: 'Invalid mint address' });
+    }
+
+    const allocation = await launchpadService.getTokenAllocationBreakdown(
+      new PublicKey(mintAddress)
+    );
+
+    const supplyInfo = await solanaService.getSupplyInfo(mintAddress, {
+      teamPerformancePackage: {
+        amount: allocation.teamPerformancePackage.amount,
+        address: allocation.teamPerformancePackage.address?.toString(),
+      },
+      futarchyAmmLiquidity: {
+        amount: allocation.futarchyAmmLiquidity.amount,
+        vaultAddress: allocation.futarchyAmmLiquidity.vaultAddress?.toString(),
+      },
+      meteoraLpLiquidity: {
+        amount: allocation.meteoraLpLiquidity.amount,
+        poolAddress: allocation.meteoraLpLiquidity.poolAddress?.toString(),
+        vaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
+      },
+      additionalTokenAllocation: allocation.additionalTokenAllocation ? {
+        amount: allocation.additionalTokenAllocation.amount,
+        recipient: allocation.additionalTokenAllocation.recipient.toString(),
+        claimed: allocation.additionalTokenAllocation.claimed,
+        tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress?.toString(),
+      } : undefined,
+      daoAddress: allocation.daoAddress?.toString(),
+      launchAddress: allocation.launchAddress?.toString(),
+      version: allocation.version,
+    });
+
+    res.json({ circulatingSupply: parseFloat(supplyInfo.circulatingSupply) });
+  } catch (error: any) {
+    console.error('Error in /api/supply/:mintAddress/jupiter/circulating:', error);
+    res.status(500).json({ error: 'Failed to fetch circulating supply' });
+  }
+});
+
+// Jupiter-compatible total supply endpoint
+app.get('/api/supply/:mintAddress/jupiter/total', async (req: Request, res: Response) => {
+  try {
+    const mintAddress = req.params.mintAddress;
+    const solanaService = getSolanaService();
+
+    if (!mintAddress || !solanaService.isValidPublicKey(mintAddress)) {
+      return res.status(400).json({ error: 'Invalid mint address' });
+    }
+
+    const supplyInfo = await solanaService.getSupplyInfo(mintAddress);
+
+    res.json({ totalSupply: parseFloat(supplyInfo.totalSupply) });
+  } catch (error: any) {
+    console.error('Error in /api/supply/:mintAddress/jupiter/total:', error);
+    res.status(500).json({ error: 'Failed to fetch total supply' });
+  }
+});
+
 // Manual Dune query execution endpoint
 app.post('/api/dune/execute', async (req: Request, res: Response) => {
   try {
