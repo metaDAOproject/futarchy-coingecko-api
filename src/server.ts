@@ -863,6 +863,56 @@ app.get('/api/buy-sell-volume/aggregates', async (req: Request, res: Response) =
   }
 });
 
+// Diagnostic endpoint - test database insert directly
+app.post('/api/buy-sell-volume/test-insert', async (req: Request, res: Response) => {
+  const databaseService = getDatabaseService();
+  
+  if (!databaseService || !databaseService.isAvailable()) {
+    return res.status(503).json({
+      error: 'Database not available',
+      isAvailable: databaseService?.isAvailable(),
+    });
+  }
+
+  try {
+    // Create a test record
+    const testRecord = {
+      token: 'TEST_TOKEN_' + Date.now(),
+      date: '2025-01-01',
+      base_volume: '100.123456',
+      target_volume: '200.654321',
+      buy_usdc_volume: '50.111',
+      sell_token_volume: '50.222',
+      high: '1.5',
+      low: '0.5',
+      trade_count: 10,
+    };
+
+    console.error('[TestInsert] Starting test with record:', JSON.stringify(testRecord));
+    
+    const result = await databaseService.upsertDailyBuySellVolumes([testRecord], false);
+    
+    console.error('[TestInsert] Result:', result);
+
+    // Verify the record was inserted
+    const count = await databaseService.getBuySellRecordCount();
+
+    res.json({
+      success: result > 0,
+      recordsUpserted: result,
+      totalRecordCount: count,
+      testRecord,
+    });
+  } catch (error: any) {
+    console.error('[TestInsert] Error:', error.message, error.stack);
+    res.status(500).json({
+      error: 'Test insert failed',
+      message: error.message,
+      stack: error.stack,
+    });
+  }
+});
+
 // ============================================
 // HEALTH & MONITORING ENDPOINTS
 // ============================================

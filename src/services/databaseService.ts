@@ -1125,21 +1125,23 @@ export class DatabaseService {
    * @param markComplete If true, marks these days as complete (for historical data)
    */
   async upsertDailyBuySellVolumes(records: DailyBuySellVolumeRecord[], markComplete: boolean = false): Promise<number> {
-    console.log(`[Database] upsertDailyBuySellVolumes called with ${records.length} records, markComplete=${markComplete}`);
-    console.log(`[Database] pool exists: ${!!this.pool}, isConnected: ${this.isConnected}`);
+    // Use console.error to ensure logs aren't buffered/lost
+    console.error(`[Database] === UPSERT START === records=${records.length}, markComplete=${markComplete}`);
+    console.error(`[Database] pool=${!!this.pool}, isConnected=${this.isConnected}`);
     
     if (!this.pool) {
-      console.log('[Database] Skipping upsert: pool is null');
+      console.error('[Database] SKIPPING: pool is null');
       return 0;
     }
     if (!this.isConnected) {
-      console.log('[Database] Skipping upsert: not connected');
+      console.error('[Database] SKIPPING: not connected');
       return 0;
     }
     if (records.length === 0) {
-      console.log('[Database] Skipping upsert: no records');
+      console.error('[Database] SKIPPING: no records');
       return 0;
     }
+    console.error('[Database] All checks passed, proceeding...');
 
     // Log a sample record to verify data format
     console.log('[Database] Proceeding with upsert...');
