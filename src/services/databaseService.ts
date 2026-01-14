@@ -1125,7 +1125,8 @@ export class DatabaseService {
    * @param markComplete If true, marks these days as complete (for historical data)
    */
   async upsertDailyBuySellVolumes(records: DailyBuySellVolumeRecord[], markComplete: boolean = false): Promise<number> {
-    console.log(`[Database] upsertDailyBuySellVolumes called with ${records.length} records`);
+    console.log(`[Database] upsertDailyBuySellVolumes called with ${records.length} records, markComplete=${markComplete}`);
+    console.log(`[Database] pool exists: ${!!this.pool}, isConnected: ${this.isConnected}`);
     
     if (!this.pool) {
       console.log('[Database] Skipping upsert: pool is null');
@@ -1141,21 +1142,30 @@ export class DatabaseService {
     }
 
     // Log a sample record to verify data format
-    if (records.length > 0) {
-      console.log('[Database] Sample record to insert:', JSON.stringify(records[0]));
+    console.log('[Database] Proceeding with upsert...');
+    try {
+      const sample = records[0]!;
+      console.log(`[Database] Sample: token=${sample.token}, date=${sample.date}, base_vol=${sample.base_volume}`);
+    } catch (e) {
+      console.log('[Database] Could not log sample record');
     }
 
     const BATCH_SIZE = 500;
     let totalUpserted = 0;
 
     try {
+      console.log('[Database] BuySell: Connecting to pool...');
       const client = await this.pool.connect();
+      console.log('[Database] BuySell: Pool connection acquired');
 
       try {
+        console.log('[Database] BuySell: Starting transaction...');
         await client.query('BEGIN');
+        console.log('[Database] BuySell: Transaction started, processing batches...');
 
         for (let i = 0; i < records.length; i += BATCH_SIZE) {
           const batch = records.slice(i, i + BATCH_SIZE);
+          console.log(`[Database] BuySell: Processing batch ${i / BATCH_SIZE + 1}, size ${batch.length}`);
           
           const values: any[] = [];
           const valuePlaceholders: string[] = [];
@@ -1194,18 +1204,23 @@ export class DatabaseService {
               updated_at = CURRENT_TIMESTAMP
           `;
 
+          console.log(`[Database] BuySell: Executing batch SQL with ${values.length} values...`);
           await client.query(batchSQL, values);
           totalUpserted += batch.length;
+          console.log(`[Database] BuySell: Batch complete, total upserted so far: ${totalUpserted}`);
           
           if (records.length > BATCH_SIZE) {
             console.log(`[Database] Buy/sell volume batch progress: ${totalUpserted}/${records.length}`);
           }
         }
 
+        console.log('[Database] BuySell: All batches complete, committing...');
         await client.query('COMMIT');
-        console.log(`[Database] Upserted ${totalUpserted} daily buy/sell volume records (complete: ${markComplete})`);
+        console.log(`[Database] BuySell: COMMITTED ${totalUpserted} daily buy/sell volume records (complete: ${markComplete})`);
         return totalUpserted;
-      } catch (error) {
+      } catch (error: any) {
+        console.error('[Database] BuySell: SQL ERROR:', error.message);
+        console.error('[Database] BuySell: Rolling back...');
         await client.query('ROLLBACK');
         throw error;
       } finally {
