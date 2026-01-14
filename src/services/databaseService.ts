@@ -1125,7 +1125,25 @@ export class DatabaseService {
    * @param markComplete If true, marks these days as complete (for historical data)
    */
   async upsertDailyBuySellVolumes(records: DailyBuySellVolumeRecord[], markComplete: boolean = false): Promise<number> {
-    if (!this.pool || !this.isConnected || records.length === 0) return 0;
+    console.log(`[Database] upsertDailyBuySellVolumes called with ${records.length} records`);
+    
+    if (!this.pool) {
+      console.log('[Database] Skipping upsert: pool is null');
+      return 0;
+    }
+    if (!this.isConnected) {
+      console.log('[Database] Skipping upsert: not connected');
+      return 0;
+    }
+    if (records.length === 0) {
+      console.log('[Database] Skipping upsert: no records');
+      return 0;
+    }
+
+    // Log a sample record to verify data format
+    if (records.length > 0) {
+      console.log('[Database] Sample record to insert:', JSON.stringify(records[0]));
+    }
 
     const BATCH_SIZE = 500;
     let totalUpserted = 0;

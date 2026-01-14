@@ -298,17 +298,28 @@ export class DailyBuySellVolumeService {
     console.log('[BuySellVolume] Transforming rows to database records...');
     let records: DailyBuySellVolumeRecord[];
     try {
-      records = result.rows.map((row: any) => ({
-        token: row.token,
-        date: row.date?.split('T')[0] || row.trading_date?.split('T')[0],
-        base_volume: String(row.base_volume || 0),
-        target_volume: String(row.target_volume || 0),
-        buy_usdc_volume: String(row.buy_usdc_volume || 0),
-        sell_token_volume: String(row.sell_token_volume || 0),
-        high: String(row.high || 0),
-        low: String(row.low || 0),
-        trade_count: row.trade_count || 0,
-      }));
+      records = result.rows.map((row: any) => {
+        // Parse date - handle both "2025-10-18T00:00:00Z" and "2025-10-18 00:00:00.000 UTC" formats
+        let dateStr = row.date || row.trading_date || '';
+        if (typeof dateStr === 'string' && dateStr.length > 0) {
+          // Extract just the date part (YYYY-MM-DD)
+          // First try splitting by T (ISO format), then by space (Dune format)
+          const parts = dateStr.includes('T') ? dateStr.split('T') : dateStr.split(' ');
+          dateStr = parts[0] || dateStr;
+        }
+        
+        return {
+          token: row.token,
+          date: dateStr,
+          base_volume: String(row.base_volume || 0),
+          target_volume: String(row.target_volume || 0),
+          buy_usdc_volume: String(row.buy_usdc_volume || 0),
+          sell_token_volume: String(row.sell_token_volume || 0),
+          high: String(row.high || 0),
+          low: String(row.low || 0),
+          trade_count: row.trade_count || 0,
+        };
+      });
     } catch (transformError: any) {
       console.error('[BuySellVolume] Error transforming rows:', transformError.message);
       throw transformError;
