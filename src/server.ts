@@ -863,8 +863,8 @@ app.get('/api/buy-sell-volume/aggregates', async (req: Request, res: Response) =
   }
 });
 
-// Diagnostic endpoint - test database insert directly
-app.post('/api/buy-sell-volume/test-insert', async (req: Request, res: Response) => {
+// Diagnostic endpoint - test database insert directly (GET for Cloudflare compatibility)
+app.get('/api/buy-sell-volume/test-insert', async (req: Request, res: Response) => {
   const databaseService = getDatabaseService();
   
   if (!databaseService || !databaseService.isAvailable()) {
