@@ -7,10 +7,11 @@ import {
   getPerformancePackageAddr, 
   PRICE_BASED_PERFORMANCE_PACKAGE_PROGRAM_ID,
   DAMM_V2_PROGRAM_ID,
-  MAINNET_METEORA_CONFIG,
+  MAINNET_METEORA_CONFIG as MAINNET_METEORA_CONFIG_V06,
 } from "@metadaoproject/futarchy/v0.6";
 import { 
   LaunchpadClient as LaunchpadClientV07,
+  MAINNET_METEORA_CONFIG as MAINNET_METEORA_CONFIG_V07,
 } from "@metadaoproject/futarchy/v0.7";
 import { getAccount, getAssociatedTokenAddress } from '@solana/spl-token';
 import { config } from '../config.js';
@@ -432,11 +433,23 @@ export class LaunchpadService {
   }
 
   /**
+   * Get the appropriate Meteora config for a given launchpad version.
+   * v0.6 and v0.7 use different Meteora configs.
+   */
+  getMeteoraConfig(version: LaunchpadVersion): PublicKey {
+    return version === 'v0.7' ? MAINNET_METEORA_CONFIG_V07 : MAINNET_METEORA_CONFIG_V06;
+  }
+
+  /**
    * Derive the Meteora DAMM v2 pool address for a token pair.
    * Seeds: ["pool", config, larger_mint, smaller_mint]
    * Token order: DESCENDING (larger first, smaller second) - per SDK's getFirstKey/getSecondKey
+   * 
+   * @param baseMint - The base token mint
+   * @param quoteMint - The quote token mint
+   * @param version - The launchpad version (determines which Meteora config to use)
    */
-  getMeteoraPoolAddress(baseMint: PublicKey, quoteMint: PublicKey): PublicKey {
+  getMeteoraPoolAddress(baseMint: PublicKey, quoteMint: PublicKey, version: LaunchpadVersion = 'v0.6'): PublicKey {
     // Sort mints - Meteora uses DESCENDING order (larger first, smaller second)
     const buf1 = baseMint.toBuffer();
     const buf2 = quoteMint.toBuffer();
@@ -447,10 +460,12 @@ export class LaunchpadService {
     const firstKey = comparison === 1 ? baseMint : quoteMint;
     const secondKey = comparison === 1 ? quoteMint : baseMint;
     
+    const meteoraConfig = this.getMeteoraConfig(version);
+    
     const [poolAddress] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("pool"),
-        MAINNET_METEORA_CONFIG.toBuffer(),
+        meteoraConfig.toBuffer(),
         firstKey.toBuffer(),
         secondKey.toBuffer(),
       ],
@@ -506,30 +521,38 @@ export class LaunchpadService {
    * This is the base token balance in the Meteora pool's vault.
    * 
    * Note: The pool address derivation follows Meteora DAMM v2 seeds.
-   * If the derived pool doesn't exist, we try to find the vault directly.
+   * v0.6 and v0.7 launches use different Meteora configs.
+   * 
+   * @param baseMint - The base token mint
+   * @param quoteMint - The quote token mint
+   * @param version - The launchpad version (determines which Meteora config to use)
    */
-  async getMeteoraLpLiquidity(baseMint: PublicKey, quoteMint: PublicKey): Promise<{
+  async getMeteoraLpLiquidity(
+    baseMint: PublicKey, 
+    quoteMint: PublicKey,
+    version: LaunchpadVersion = 'v0.6'
+  ): Promise<{
     amount: BN;
     poolAddress?: PublicKey;
     vaultAddress?: PublicKey;
   }> {
     try {
-      const poolAddress = this.getMeteoraPoolAddress(baseMint, quoteMint);
+      const meteoraConfig = this.getMeteoraConfig(version);
+      const poolAddress = this.getMeteoraPoolAddress(baseMint, quoteMint, version);
       const vaultAddress = this.getMeteoraPoolVault(poolAddress, baseMint);
       
-      console.log(`[Meteora] Checking pool ${poolAddress.toString()} vault ${vaultAddress.toString()} for ${baseMint.toString()}`);
+      console.log(`[Meteora] Checking ${version} pool ${poolAddress.toString()} (config: ${meteoraConfig.toString().slice(0, 8)}...) vault ${vaultAddress.toString()} for ${baseMint.toString()}`);
       
       const tokenAccount = await getAccount(this.connection, vaultAddress);
       const amount = new BN(tokenAccount.amount.toString());
 
-      console.log(`[Meteora] Found ${amount.toString()} tokens in Meteora pool`);
+      console.log(`[Meteora] Found ${amount.toString()} tokens in Meteora ${version} pool`);
       return { amount, poolAddress, vaultAddress };
     } catch (error: any) {
       // Pool might not exist or vault might be empty - log more details
-      console.log(`[Meteora] Pool lookup failed for ${baseMint.toString()}: ${error.message || 'Unknown error'}`);
+      console.log(`[Meteora] ${version} pool lookup failed for ${baseMint.toString()}: ${error.message || 'Unknown error'}`);
       
-      // Try alternative: look for the pool with different config or derivation
-      // This can be enhanced later when we know the exact Meteora pool structure
+      // If we tried v0.7 and failed, don't try v0.6 as fallback - the version is determined by the launch
       return { amount: new BN(0) };
     }
   }
@@ -587,9 +610,10 @@ export class LaunchpadService {
       const futarchyAmm = await this.getFutarchyAmmLiquidity(launch.dao);
 
       // Get Meteora LP liquidity (if quote mint is available)
+      // Use the correct Meteora config based on launch version
       let meteoraLp: { amount: BN; poolAddress?: PublicKey; vaultAddress?: PublicKey } = { amount: new BN(0) };
       if (quoteMint) {
-        meteoraLp = await this.getMeteoraLpLiquidity(baseMint, quoteMint);
+        meteoraLp = await this.getMeteoraLpLiquidity(baseMint, quoteMint, launch.version);
       }
 
       // Handle additional token allocation (v0.7+ only)
