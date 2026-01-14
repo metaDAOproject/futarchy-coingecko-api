@@ -299,13 +299,17 @@ export class DailyBuySellVolumeService {
     let records: DailyBuySellVolumeRecord[];
     try {
       records = result.rows.map((row: any) => {
-        // Parse date - handle both "2025-10-18T00:00:00Z" and "2025-10-18 00:00:00.000 UTC" formats
-        let dateStr = row.date || row.trading_date || '';
-        if (typeof dateStr === 'string' && dateStr.length > 0) {
-          // Extract just the date part (YYYY-MM-DD)
-          // First try splitting by T (ISO format), then by space (Dune format)
-          const parts = dateStr.includes('T') ? dateStr.split('T') : dateStr.split(' ');
-          dateStr = parts[0] || dateStr;
+        // Parse date - extract YYYY-MM-DD from various formats
+        // Dune returns: "2025-10-18 00:00:00.000 UTC" or Date object
+        let rawDate = row.date || row.trading_date || '';
+        let dateStr = '';
+        
+        if (rawDate instanceof Date) {
+          // If it's a Date object, format it
+          dateStr = rawDate.toISOString().substring(0, 10);
+        } else if (typeof rawDate === 'string') {
+          // Extract first 10 chars (YYYY-MM-DD) - most reliable approach
+          dateStr = rawDate.substring(0, 10);
         }
         
         return {
