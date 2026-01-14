@@ -32,6 +32,33 @@ export interface TenMinuteVolumeRecord {
   trade_count: number;
 }
 
+export interface DailyBuySellVolumeRecord {
+  token: string;
+  date: string; // YYYY-MM-DD
+  base_volume: string;
+  target_volume: string;
+  buy_usdc_volume: string;
+  sell_token_volume: string;
+  high: string;
+  low: string;
+  trade_count: number;
+}
+
+export interface CumulativeVolumeData {
+  token: string;
+  date: string;
+  base_volume: string;
+  target_volume: string;
+  buy_usdc_volume: string;
+  sell_token_volume: string;
+  cumulative_target_volume: string;
+  cumulative_base_volume: string;
+  cumulative_buy_usdc_volume: string;
+  cumulative_sell_token_volume: string;
+  high: string;
+  low: string;
+}
+
 export interface Rolling24hMetrics {
   token: string;
   base_volume_24h: string;
@@ -173,6 +200,58 @@ export class DatabaseService {
         value TEXT NOT NULL,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       );
+
+      -- Daily buy/sell volumes table for tracking directional volume
+      CREATE TABLE IF NOT EXISTS daily_buy_sell_volumes (
+        id SERIAL PRIMARY KEY,
+        token VARCHAR(64) NOT NULL,
+        date DATE NOT NULL,
+        base_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        target_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        buy_usdc_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_token_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        high NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        low NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        trade_count INT NOT NULL DEFAULT 0,
+        is_complete BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(token, date)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_daily_buy_sell_volumes_token ON daily_buy_sell_volumes(token);
+      CREATE INDEX IF NOT EXISTS idx_daily_buy_sell_volumes_date ON daily_buy_sell_volumes(date);
+      CREATE INDEX IF NOT EXISTS idx_daily_buy_sell_volumes_token_date ON daily_buy_sell_volumes(token, date);
+
+      -- Metrics history table for storing periodic snapshots of system metrics
+      CREATE TABLE IF NOT EXISTS metrics_history (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        metric_name VARCHAR(128) NOT NULL,
+        metric_value NUMERIC(40, 12) NOT NULL,
+        labels JSONB DEFAULT '{}',
+        UNIQUE(timestamp, metric_name, labels)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_metrics_history_timestamp ON metrics_history(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_metrics_history_name ON metrics_history(metric_name);
+      CREATE INDEX IF NOT EXISTS idx_metrics_history_name_time ON metrics_history(metric_name, timestamp DESC);
+
+      -- Service health snapshots for historical analysis
+      CREATE TABLE IF NOT EXISTS service_health_snapshots (
+        id SERIAL PRIMARY KEY,
+        timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        service_name VARCHAR(64) NOT NULL,
+        is_healthy BOOLEAN NOT NULL,
+        last_refresh_time TIMESTAMPTZ,
+        record_count INT,
+        error_message TEXT,
+        metadata JSONB DEFAULT '{}'
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_service_health_timestamp ON service_health_snapshots(timestamp DESC);
+      CREATE INDEX IF NOT EXISTS idx_service_health_service ON service_health_snapshots(service_name);
+      CREATE INDEX IF NOT EXISTS idx_service_health_service_time ON service_health_snapshots(service_name, timestamp DESC);
     `;
 
     await this.pool.query(createTableSQL);
@@ -1016,6 +1095,467 @@ export class DatabaseService {
     } catch (error: any) {
       console.error('[Database] Error pruning old 10-min data:', error.message);
       return 0;
+    }
+  }
+
+  // ============================================
+  // DAILY BUY/SELL VOLUME METHODS
+  // ============================================
+
+  /**
+   * Get the latest date we have buy/sell data for
+   */
+  async getLatestBuySellDate(): Promise<string | null> {
+    if (!this.pool || !this.isConnected) return null;
+
+    try {
+      const result = await this.pool.query(
+        'SELECT MAX(date) as latest_date FROM daily_buy_sell_volumes WHERE is_complete = true'
+      );
+      return result.rows[0]?.latest_date?.toISOString().split('T')[0] || null;
+    } catch (error: any) {
+      console.error('[Database] Error getting latest buy/sell date:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Upsert daily buy/sell volume records using batched inserts
+   * @param records Array of daily buy/sell volume records
+   * @param markComplete If true, marks these days as complete (for historical data)
+   */
+  async upsertDailyBuySellVolumes(records: DailyBuySellVolumeRecord[], markComplete: boolean = false): Promise<number> {
+    if (!this.pool || !this.isConnected || records.length === 0) return 0;
+
+    const BATCH_SIZE = 500;
+    let totalUpserted = 0;
+
+    try {
+      const client = await this.pool.connect();
+
+      try {
+        await client.query('BEGIN');
+
+        for (let i = 0; i < records.length; i += BATCH_SIZE) {
+          const batch = records.slice(i, i + BATCH_SIZE);
+          
+          const values: any[] = [];
+          const valuePlaceholders: string[] = [];
+          
+          batch.forEach((record, idx) => {
+            const offset = idx * 9; // 9 parameters per record
+            valuePlaceholders.push(
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, ${markComplete}, CURRENT_TIMESTAMP)`
+            );
+            values.push(
+              record.token,
+              record.date,
+              record.base_volume,
+              record.target_volume,
+              record.buy_usdc_volume,
+              record.sell_token_volume,
+              record.high,
+              record.low,
+              record.trade_count || 0
+            );
+          });
+
+          const batchSQL = `
+            INSERT INTO daily_buy_sell_volumes (token, date, base_volume, target_volume, buy_usdc_volume, sell_token_volume, high, low, trade_count, is_complete, updated_at)
+            VALUES ${valuePlaceholders.join(', ')}
+            ON CONFLICT (token, date) 
+            DO UPDATE SET 
+              base_volume = EXCLUDED.base_volume,
+              target_volume = EXCLUDED.target_volume,
+              buy_usdc_volume = EXCLUDED.buy_usdc_volume,
+              sell_token_volume = EXCLUDED.sell_token_volume,
+              high = EXCLUDED.high,
+              low = EXCLUDED.low,
+              trade_count = EXCLUDED.trade_count,
+              is_complete = CASE WHEN EXCLUDED.is_complete THEN true ELSE daily_buy_sell_volumes.is_complete END,
+              updated_at = CURRENT_TIMESTAMP
+          `;
+
+          await client.query(batchSQL, values);
+          totalUpserted += batch.length;
+          
+          if (records.length > BATCH_SIZE) {
+            console.log(`[Database] Buy/sell volume batch progress: ${totalUpserted}/${records.length}`);
+          }
+        }
+
+        await client.query('COMMIT');
+        console.log(`[Database] Upserted ${totalUpserted} daily buy/sell volume records (complete: ${markComplete})`);
+        return totalUpserted;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      console.error('[Database] Error upserting daily buy/sell volumes:', error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Get daily buy/sell volumes with cumulative totals calculated from DB
+   * Cumulative values are computed on-the-fly using window functions
+   */
+  async getDailyBuySellVolumesWithCumulative(token?: string): Promise<CumulativeVolumeData[]> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      let whereClause = '';
+      let params: any[] = [];
+
+      if (token) {
+        whereClause = 'WHERE LOWER(token) = LOWER($1)';
+        params = [token];
+      }
+
+      const result = await this.pool.query(
+        `SELECT 
+          token,
+          date::text,
+          base_volume::text,
+          target_volume::text,
+          buy_usdc_volume::text,
+          sell_token_volume::text,
+          SUM(target_volume) OVER (
+            PARTITION BY token
+            ORDER BY date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          )::text AS cumulative_target_volume,
+          SUM(base_volume) OVER (
+            PARTITION BY token
+            ORDER BY date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          )::text AS cumulative_base_volume,
+          SUM(buy_usdc_volume) OVER (
+            PARTITION BY token
+            ORDER BY date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          )::text AS cumulative_buy_usdc_volume,
+          SUM(sell_token_volume) OVER (
+            PARTITION BY token
+            ORDER BY date
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          )::text AS cumulative_sell_token_volume,
+          high::text,
+          low::text
+         FROM daily_buy_sell_volumes
+         ${whereClause}
+         ORDER BY token, date ASC`,
+        params
+      );
+
+      return result.rows;
+    } catch (error: any) {
+      console.error('[Database] Error getting cumulative volumes:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get aggregated buy/sell stats for all tokens
+   */
+  async getBuySellAggregates(tokens?: string[]): Promise<Map<string, {
+    total_buy_usdc: string;
+    total_sell_token: string;
+    total_base_volume: string;
+    total_target_volume: string;
+    first_date: string;
+    last_date: string;
+    trading_days: number;
+  }>> {
+    if (!this.pool || !this.isConnected) return new Map();
+
+    try {
+      let whereClause = '';
+      let params: any[] = [];
+
+      if (tokens && tokens.length > 0) {
+        const placeholders = tokens.map((_, i) => `LOWER($${i + 1})`).join(', ');
+        whereClause = `WHERE LOWER(token) IN (${placeholders})`;
+        params = tokens.map(t => t.toLowerCase());
+      }
+
+      const result = await this.pool.query(
+        `SELECT 
+          token,
+          SUM(buy_usdc_volume)::text AS total_buy_usdc,
+          SUM(sell_token_volume)::text AS total_sell_token,
+          SUM(base_volume)::text AS total_base_volume,
+          SUM(target_volume)::text AS total_target_volume,
+          MIN(date)::text AS first_date,
+          MAX(date)::text AS last_date,
+          COUNT(*)::int AS trading_days
+         FROM daily_buy_sell_volumes
+         ${whereClause}
+         GROUP BY token
+         ORDER BY SUM(target_volume) DESC`,
+        params
+      );
+
+      const aggregates = new Map();
+      for (const row of result.rows) {
+        aggregates.set(row.token.toLowerCase(), {
+          total_buy_usdc: row.total_buy_usdc || '0',
+          total_sell_token: row.total_sell_token || '0',
+          total_base_volume: row.total_base_volume || '0',
+          total_target_volume: row.total_target_volume || '0',
+          first_date: row.first_date,
+          last_date: row.last_date,
+          trading_days: row.trading_days || 0,
+        });
+      }
+      return aggregates;
+    } catch (error: any) {
+      console.error('[Database] Error getting buy/sell aggregates:', error.message);
+      return new Map();
+    }
+  }
+
+  /**
+   * Get buy/sell volume record count
+   */
+  async getBuySellRecordCount(): Promise<number> {
+    if (!this.pool || !this.isConnected) return 0;
+
+    try {
+      const result = await this.pool.query('SELECT COUNT(*) as count FROM daily_buy_sell_volumes');
+      return parseInt(result.rows[0]?.count || '0');
+    } catch (error: any) {
+      console.error('[Database] Error getting buy/sell record count:', error.message);
+      return 0;
+    }
+  }
+
+  /**
+   * Mark days as complete (called when day boundary passes)
+   */
+  async markBuySellDaysComplete(beforeDate: string): Promise<void> {
+    if (!this.pool || !this.isConnected) return;
+
+    try {
+      await this.pool.query(
+        `UPDATE daily_buy_sell_volumes SET is_complete = true, updated_at = CURRENT_TIMESTAMP
+         WHERE date < $1 AND is_complete = false`,
+        [beforeDate]
+      );
+      console.log(`[Database] Marked buy/sell days before ${beforeDate} as complete`);
+    } catch (error: any) {
+      console.error('[Database] Error marking buy/sell days complete:', error.message);
+    }
+  }
+
+  // ============================================
+  // METRICS HISTORY METHODS
+  // ============================================
+
+  /**
+   * Insert a metrics snapshot
+   */
+  async insertMetric(metricName: string, value: number, labels: Record<string, string> = {}): Promise<void> {
+    if (!this.pool || !this.isConnected) return;
+
+    try {
+      await this.pool.query(
+        `INSERT INTO metrics_history (metric_name, metric_value, labels)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (timestamp, metric_name, labels) DO UPDATE SET metric_value = $2`,
+        [metricName, value, JSON.stringify(labels)]
+      );
+    } catch (error: any) {
+      // Silently ignore metrics insert errors to not affect main operations
+      console.error('[Database] Error inserting metric:', error.message);
+    }
+  }
+
+  /**
+   * Insert multiple metrics at once
+   */
+  async insertMetricsBatch(metrics: Array<{ name: string; value: number; labels?: Record<string, string> }>): Promise<void> {
+    if (!this.pool || !this.isConnected || metrics.length === 0) return;
+
+    try {
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+        
+        for (const metric of metrics) {
+          await client.query(
+            `INSERT INTO metrics_history (metric_name, metric_value, labels)
+             VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING`,
+            [metric.name, metric.value, JSON.stringify(metric.labels || {})]
+          );
+        }
+        
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      console.error('[Database] Error inserting metrics batch:', error.message);
+    }
+  }
+
+  /**
+   * Insert a service health snapshot
+   */
+  async insertServiceHealthSnapshot(
+    serviceName: string,
+    isHealthy: boolean,
+    lastRefreshTime?: Date,
+    recordCount?: number,
+    errorMessage?: string,
+    metadata?: Record<string, any>
+  ): Promise<void> {
+    if (!this.pool || !this.isConnected) return;
+
+    try {
+      await this.pool.query(
+        `INSERT INTO service_health_snapshots 
+         (service_name, is_healthy, last_refresh_time, record_count, error_message, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [
+          serviceName,
+          isHealthy,
+          lastRefreshTime || null,
+          recordCount || null,
+          errorMessage || null,
+          JSON.stringify(metadata || {})
+        ]
+      );
+    } catch (error: any) {
+      console.error('[Database] Error inserting service health snapshot:', error.message);
+    }
+  }
+
+  /**
+   * Get recent metrics for a specific metric name
+   */
+  async getRecentMetrics(
+    metricName: string,
+    hours: number = 24,
+    labels?: Record<string, string>
+  ): Promise<Array<{ timestamp: string; value: number; labels: Record<string, string> }>> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+      
+      let query = `
+        SELECT timestamp::text, metric_value::numeric as value, labels
+        FROM metrics_history
+        WHERE metric_name = $1 AND timestamp >= $2
+      `;
+      const params: any[] = [metricName, cutoff];
+
+      if (labels && Object.keys(labels).length > 0) {
+        query += ' AND labels @> $3';
+        params.push(JSON.stringify(labels));
+      }
+
+      query += ' ORDER BY timestamp DESC LIMIT 1000';
+
+      const result = await this.pool.query(query, params);
+      return result.rows.map(row => ({
+        timestamp: row.timestamp,
+        value: parseFloat(row.value),
+        labels: row.labels,
+      }));
+    } catch (error: any) {
+      console.error('[Database] Error getting recent metrics:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Get service health history
+   */
+  async getServiceHealthHistory(
+    serviceName?: string,
+    hours: number = 24
+  ): Promise<Array<{
+    timestamp: string;
+    service_name: string;
+    is_healthy: boolean;
+    last_refresh_time: string | null;
+    record_count: number | null;
+    error_message: string | null;
+    metadata: Record<string, any>;
+  }>> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      const cutoff = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+      
+      let query = `
+        SELECT 
+          timestamp::text,
+          service_name,
+          is_healthy,
+          last_refresh_time::text,
+          record_count,
+          error_message,
+          metadata
+        FROM service_health_snapshots
+        WHERE timestamp >= $1
+      `;
+      const params: any[] = [cutoff];
+
+      if (serviceName) {
+        query += ' AND service_name = $2';
+        params.push(serviceName);
+      }
+
+      query += ' ORDER BY timestamp DESC LIMIT 1000';
+
+      const result = await this.pool.query(query, params);
+      return result.rows;
+    } catch (error: any) {
+      console.error('[Database] Error getting service health history:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Prune old metrics data (keep last N days)
+   */
+  async pruneOldMetrics(keepDays: number = 30): Promise<{ metricsDeleted: number; healthDeleted: number }> {
+    if (!this.pool || !this.isConnected) return { metricsDeleted: 0, healthDeleted: 0 };
+
+    try {
+      const cutoff = new Date(Date.now() - keepDays * 24 * 60 * 60 * 1000).toISOString();
+      
+      const metricsResult = await this.pool.query(
+        'DELETE FROM metrics_history WHERE timestamp < $1 RETURNING id',
+        [cutoff]
+      );
+      
+      const healthResult = await this.pool.query(
+        'DELETE FROM service_health_snapshots WHERE timestamp < $1 RETURNING id',
+        [cutoff]
+      );
+
+      const metricsDeleted = metricsResult.rowCount || 0;
+      const healthDeleted = healthResult.rowCount || 0;
+
+      if (metricsDeleted > 0 || healthDeleted > 0) {
+        console.log(`[Database] Pruned ${metricsDeleted} metrics and ${healthDeleted} health snapshots older than ${keepDays} days`);
+      }
+
+      return { metricsDeleted, healthDeleted };
+    } catch (error: any) {
+      console.error('[Database] Error pruning old metrics:', error.message);
+      return { metricsDeleted: 0, healthDeleted: 0 };
     }
   }
 

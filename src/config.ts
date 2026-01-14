@@ -50,6 +50,8 @@ export const config = {
     // Hourly query ID for rolling 24h metrics (refreshed every ~10 min)
     hourlyVolumeQueryId: process.env.DUNE_HOURLY_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_HOURLY_VOLUME_QUERY_ID) : undefined,
     tenMinuteVolumeQueryId: process.env.DUNE_TEN_MINUTE_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_TEN_MINUTE_VOLUME_QUERY_ID) : undefined,
+    // Daily buy/sell volume query ID (refreshed daily at 00:05 UTC)
+    dailyBuySellVolumeQueryId: process.env.DUNE_DAILY_BUY_SELL_VOLUME_QUERY_ID ? parseInt(process.env.DUNE_DAILY_BUY_SELL_VOLUME_QUERY_ID) : undefined,
   },
   database: {
     // PostgreSQL connection - can use either connection string or individual params

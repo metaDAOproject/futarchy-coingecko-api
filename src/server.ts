@@ -9,6 +9,8 @@ import { DatabaseService } from './services/databaseService.js';
 import { VolumeHistoryService } from './services/volumeHistoryService.js';
 import { HourlyVolumeService } from './services/hourlyVolumeService.js';
 import { TenMinuteVolumeService } from './services/tenMinuteVolumeService.js';
+import { DailyBuySellVolumeService } from './services/dailyBuySellVolumeService.js';
+import { metricsService } from './services/metricsService.js';
 import { config } from './config.js';
 import type { CoinGeckoTicker } from './types/coingecko.js';
 import { PublicKey } from '@solana/web3.js';
@@ -28,6 +30,7 @@ let databaseServiceInstance: DatabaseService | null = null;
 let volumeHistoryServiceInstance: VolumeHistoryService | null = null;
 let hourlyVolumeServiceInstance: HourlyVolumeService | null = null;
 let tenMinuteVolumeServiceInstance: TenMinuteVolumeService | null = null;
+let dailyBuySellVolumeServiceInstance: DailyBuySellVolumeService | null = null;
 
 function getFutarchyService(): FutarchyService {
   if (!futarchyServiceInstance) {
@@ -92,6 +95,18 @@ function getTenMinuteVolumeService(): TenMinuteVolumeService | null {
     }
   }
   return tenMinuteVolumeServiceInstance;
+}
+
+function getDailyBuySellVolumeService(): DailyBuySellVolumeService | null {
+  if (!dailyBuySellVolumeServiceInstance) {
+    const duneService = getDuneService();
+    const databaseService = getDatabaseService();
+    const futarchyService = getFutarchyService();
+    if (duneService) {
+      dailyBuySellVolumeServiceInstance = new DailyBuySellVolumeService(duneService, databaseService, futarchyService);
+    }
+  }
+  return dailyBuySellVolumeServiceInstance;
 }
 
 function getDuneCacheService(): DuneCacheService | null {
@@ -178,6 +193,132 @@ function rateLimit(req: Request, res: Response, next: NextFunction) {
 }
 
 app.use(rateLimit);
+
+// Metrics middleware - track HTTP request metrics
+app.use((req: Request, res: Response, next: NextFunction) => {
+  // Skip metrics endpoint to avoid recursion
+  if (req.path === '/metrics') {
+    return next();
+  }
+
+  const startTime = Date.now();
+  metricsService.incrementHttpRequestsInFlight();
+
+  // Track response completion
+  res.on('finish', () => {
+    metricsService.decrementHttpRequestsInFlight();
+    const durationSeconds = (Date.now() - startTime) / 1000;
+    metricsService.recordHttpRequest(req.method, req.path, res.statusCode, durationSeconds);
+  });
+
+  next();
+});
+
+// Prometheus metrics endpoint
+app.get('/metrics', async (req: Request, res: Response) => {
+  try {
+    // Update service metrics before returning
+    await updateMetricsSnapshot();
+    
+    res.set('Content-Type', metricsService.getContentType());
+    res.end(await metricsService.getMetrics());
+  } catch (error: any) {
+    console.error('[Metrics] Error generating metrics:', error);
+    res.status(500).end('Error generating metrics');
+  }
+});
+
+// Helper function to update all metrics
+async function updateMetricsSnapshot(): Promise<void> {
+  const databaseService = getDatabaseService();
+  const duneCacheService = getDuneCacheService();
+  const hourlyVolumeService = getHourlyVolumeService();
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  const volumeHistoryService = getVolumeHistoryService();
+
+  // Database metrics
+  metricsService.setDatabaseConnected(databaseService.isAvailable());
+  
+  if (databaseService.isAvailable()) {
+    try {
+      // Record counts
+      const dailyCount = await databaseService.getDailyRecordCount();
+      const hourlyCount = await databaseService.getHourlyRecordCount();
+      const tenMinCount = await databaseService.getTenMinuteRecordCount();
+      const buySellCount = await databaseService.getBuySellRecordCount();
+      
+      metricsService.setDatabaseRecordCount('daily_volumes', dailyCount);
+      metricsService.setDatabaseRecordCount('hourly_volumes', hourlyCount);
+      metricsService.setDatabaseRecordCount('ten_minute_volumes', tenMinCount);
+      metricsService.setDatabaseRecordCount('daily_buy_sell_volumes', buySellCount);
+
+      // Token counts
+      const dailyTokens = await databaseService.getTokenCount();
+      const hourlyTokens = await databaseService.getHourlyTokenCount();
+      metricsService.setDatabaseTokenCount('daily_volumes', dailyTokens);
+      metricsService.setDatabaseTokenCount('hourly_volumes', hourlyTokens);
+
+      // Latest dates
+      const latestDaily = await databaseService.getLatestDate();
+      const latestHourly = await databaseService.getLatestHour();
+      const latestTenMin = await databaseService.getLatestTenMinuteBucket();
+      const latestBuySell = await databaseService.getLatestBuySellDate();
+      
+      metricsService.setDatabaseLatestDate('daily_volumes', latestDaily);
+      metricsService.setDatabaseLatestDate('hourly_volumes', latestHourly);
+      metricsService.setDatabaseLatestDate('ten_minute_volumes', latestTenMin);
+      metricsService.setDatabaseLatestDate('daily_buy_sell_volumes', latestBuySell);
+    } catch (error) {
+      console.error('[Metrics] Error fetching database metrics:', error);
+    }
+  }
+
+  // Service status metrics
+  if (duneCacheService) {
+    const status = duneCacheService.getCacheStatus();
+    metricsService.setServiceStatus('dune_cache', status.isInitialized);
+    metricsService.setRefreshInProgress('dune_cache', status.isRefreshing);
+    if (status.lastUpdated) {
+      metricsService.setLastRefreshTime('dune_cache', status.lastUpdated);
+      metricsService.updateTimeSinceLastRefresh('dune_cache', status.lastUpdated.getTime());
+    }
+  }
+
+  if (hourlyVolumeService) {
+    metricsService.setServiceStatus('hourly_volume', hourlyVolumeService.isInitialized);
+    metricsService.setRefreshInProgress('hourly_volume', false); // Would need to expose this
+  }
+
+  if (tenMinuteVolumeService) {
+    const status = tenMinuteVolumeService.getStatus();
+    metricsService.setServiceStatus('ten_minute_volume', status.initialized);
+    metricsService.setRefreshInProgress('ten_minute_volume', status.refreshInProgress);
+    if (status.lastRefreshTime) {
+      metricsService.setLastRefreshTime('ten_minute_volume', new Date(status.lastRefreshTime));
+      metricsService.updateTimeSinceLastRefresh('ten_minute_volume', new Date(status.lastRefreshTime).getTime());
+    }
+  }
+
+  if (dailyBuySellVolumeService) {
+    const status = dailyBuySellVolumeService.getStatus();
+    metricsService.setServiceStatus('daily_buy_sell_volume', status.initialized);
+    metricsService.setRefreshInProgress('daily_buy_sell_volume', status.isRefreshing);
+  }
+
+  if (volumeHistoryService) {
+    metricsService.setServiceStatus('volume_history', true); // Would need to expose this
+  }
+
+  // Try to get active DAO count
+  try {
+    const futarchyService = getFutarchyService();
+    const daos = await futarchyService.getAllDaos();
+    metricsService.setActiveDaosCount(daos.length);
+  } catch (error) {
+    // Ignore errors during metrics collection
+  }
+}
 
 // CoinGecko Endpoint 1: /tickers
 app.get('/api/tickers', async (req: Request, res: Response) => {
@@ -613,6 +754,354 @@ app.post('/api/ten-minute-volume/refresh', async (req: Request, res: Response) =
     });
   }
 });
+
+// ============================================
+// DAILY BUY/SELL VOLUME ENDPOINTS
+// ============================================
+
+// Buy/sell volume status endpoint
+app.get('/api/buy-sell-volume/status', async (req: Request, res: Response) => {
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  
+  if (!dailyBuySellVolumeService) {
+    return res.status(400).json({
+      error: 'Buy/Sell Volume service not configured',
+      message: 'DUNE_API_KEY is required',
+    });
+  }
+
+  const status = dailyBuySellVolumeService.getStatus();
+  res.json({
+    ...status,
+    description: 'Tracks daily buy vs sell volume per token with cumulative totals',
+    schedule: 'Daily at 00:05 UTC',
+  });
+});
+
+// Force buy/sell volume refresh endpoint
+app.post('/api/buy-sell-volume/refresh', async (req: Request, res: Response) => {
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  
+  if (!dailyBuySellVolumeService) {
+    return res.status(400).json({
+      error: 'Buy/Sell Volume service not configured',
+      message: 'DUNE_API_KEY is required',
+    });
+  }
+
+  try {
+    const result = await dailyBuySellVolumeService.forceRefresh();
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to trigger refresh',
+      message: error.message,
+    });
+  }
+});
+
+// Get cumulative volume data for all tokens or a specific token
+app.get('/api/buy-sell-volume/cumulative', async (req: Request, res: Response) => {
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  
+  if (!dailyBuySellVolumeService || !dailyBuySellVolumeService.isReady()) {
+    return res.status(503).json({
+      error: 'Buy/Sell Volume service not ready',
+      message: 'Service is initializing or database is not connected',
+    });
+  }
+
+  try {
+    const token = req.query.token as string | undefined;
+    const data = await dailyBuySellVolumeService.getCumulativeVolumes(token);
+    
+    res.json({
+      token: token || 'all',
+      count: data.length,
+      data,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to get cumulative volumes',
+      message: error.message,
+    });
+  }
+});
+
+// Get aggregated buy/sell stats
+app.get('/api/buy-sell-volume/aggregates', async (req: Request, res: Response) => {
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  
+  if (!dailyBuySellVolumeService || !dailyBuySellVolumeService.isReady()) {
+    return res.status(503).json({
+      error: 'Buy/Sell Volume service not ready',
+      message: 'Service is initializing or database is not connected',
+    });
+  }
+
+  try {
+    const tokensParam = req.query.tokens as string | undefined;
+    const tokens = tokensParam ? tokensParam.split(',').map(t => t.trim()) : undefined;
+    
+    const aggregates = await dailyBuySellVolumeService.getAggregates(tokens);
+    
+    // Convert Map to object for JSON response
+    const result: Record<string, any> = {};
+    for (const [token, stats] of aggregates) {
+      result[token] = stats;
+    }
+    
+    res.json({
+      count: aggregates.size,
+      aggregates: result,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to get aggregates',
+      message: error.message,
+    });
+  }
+});
+
+// ============================================
+// HEALTH & MONITORING ENDPOINTS
+// ============================================
+
+// Comprehensive health check endpoint
+app.get('/api/health', async (req: Request, res: Response) => {
+  const databaseService = getDatabaseService();
+  const duneCacheService = getDuneCacheService();
+  const hourlyVolumeService = getHourlyVolumeService();
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+
+  const health: Record<string, any> = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    services: {},
+    database: {
+      connected: databaseService.isAvailable(),
+    },
+  };
+
+  // Check each service
+  if (duneCacheService) {
+    const status = duneCacheService.getCacheStatus();
+    health.services.dune_cache = {
+      initialized: status.isInitialized,
+      refreshing: status.isRefreshing,
+      lastRefreshTime: status.lastUpdated ? status.lastUpdated.toISOString() : null,
+    };
+  }
+
+  if (hourlyVolumeService) {
+    health.services.hourly_volume = {
+      initialized: hourlyVolumeService.isInitialized,
+      databaseConnected: hourlyVolumeService.isDatabaseConnected(),
+    };
+  }
+
+  if (tenMinuteVolumeService) {
+    const status = tenMinuteVolumeService.getStatus();
+    health.services.ten_minute_volume = {
+      initialized: status.initialized,
+      running: status.isRunning,
+      refreshing: status.refreshInProgress,
+      lastRefreshTime: status.lastRefreshTime,
+    };
+  }
+
+  if (dailyBuySellVolumeService) {
+    const status = dailyBuySellVolumeService.getStatus();
+    health.services.daily_buy_sell_volume = {
+      initialized: status.initialized,
+      refreshing: status.isRefreshing,
+      queryConfigured: status.queryIdConfigured,
+    };
+  }
+
+  // Determine overall health status
+  const hasUnhealthyService = Object.values(health.services).some(
+    (s: any) => s.initialized === false
+  );
+  
+  if (!databaseService.isAvailable()) {
+    health.status = 'degraded';
+    health.message = 'Database not connected';
+  } else if (hasUnhealthyService) {
+    health.status = 'degraded';
+    health.message = 'One or more services not initialized';
+  }
+
+  res.json(health);
+});
+
+// Get metrics history from database
+app.get('/api/metrics/history/:metricName', async (req: Request, res: Response) => {
+  const databaseService = getDatabaseService();
+  
+  if (!databaseService.isAvailable()) {
+    return res.status(503).json({
+      error: 'Database not connected',
+      message: 'Metrics history requires database connection',
+    });
+  }
+
+  try {
+    const metricName = req.params.metricName as string;
+    if (!metricName) {
+      return res.status(400).json({ error: 'Metric name is required' });
+    }
+    
+    const hours = parseInt(req.query.hours as string) || 24;
+    const labelsParam = req.query.labels as string | undefined;
+    const labels = labelsParam ? JSON.parse(labelsParam) : undefined;
+
+    const data = await databaseService.getRecentMetrics(metricName, hours, labels);
+    
+    res.json({
+      metric: metricName,
+      hours,
+      count: data.length,
+      data,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to get metrics history',
+      message: error.message,
+    });
+  }
+});
+
+// Get service health history from database
+app.get('/api/health/history', async (req: Request, res: Response) => {
+  const databaseService = getDatabaseService();
+  
+  if (!databaseService.isAvailable()) {
+    return res.status(503).json({
+      error: 'Database not connected',
+      message: 'Health history requires database connection',
+    });
+  }
+
+  try {
+    const serviceName = req.query.service as string | undefined;
+    const hours = parseInt(req.query.hours as string) || 24;
+
+    const data = await databaseService.getServiceHealthHistory(serviceName, hours);
+    
+    res.json({
+      service: serviceName || 'all',
+      hours,
+      count: data.length,
+      data,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to get health history',
+      message: error.message,
+    });
+  }
+});
+
+// Manually trigger a health snapshot (useful for debugging)
+app.post('/api/health/snapshot', async (req: Request, res: Response) => {
+  const databaseService = getDatabaseService();
+  
+  if (!databaseService.isAvailable()) {
+    return res.status(503).json({
+      error: 'Database not connected',
+    });
+  }
+
+  try {
+    await saveHealthSnapshots();
+    res.json({ message: 'Health snapshot saved successfully' });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to save health snapshot',
+      message: error.message,
+    });
+  }
+});
+
+// Helper function to save health snapshots to database
+async function saveHealthSnapshots(): Promise<void> {
+  const databaseService = getDatabaseService();
+  const duneCacheService = getDuneCacheService();
+  const hourlyVolumeService = getHourlyVolumeService();
+  const tenMinuteVolumeService = getTenMinuteVolumeService();
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+
+  if (!databaseService.isAvailable()) return;
+
+  // Save Dune cache status
+  if (duneCacheService) {
+    const status = duneCacheService.getCacheStatus();
+    await databaseService.insertServiceHealthSnapshot(
+      'dune_cache',
+      status.isInitialized,
+      status.lastUpdated,
+      undefined,
+      undefined,
+      { isRefreshing: status.isRefreshing }
+    );
+  }
+
+  // Save hourly volume status
+  if (hourlyVolumeService) {
+    const recordCount = await databaseService.getHourlyRecordCount();
+    await databaseService.insertServiceHealthSnapshot(
+      'hourly_volume',
+      hourlyVolumeService.isInitialized,
+      undefined,
+      recordCount,
+      undefined,
+      { databaseConnected: hourlyVolumeService.isDatabaseConnected() }
+    );
+  }
+
+  // Save 10-minute volume status
+  if (tenMinuteVolumeService) {
+    const status = tenMinuteVolumeService.getStatus();
+    const recordCount = await databaseService.getTenMinuteRecordCount();
+    await databaseService.insertServiceHealthSnapshot(
+      'ten_minute_volume',
+      status.initialized,
+      status.lastRefreshTime ? new Date(status.lastRefreshTime) : undefined,
+      recordCount,
+      undefined,
+      { isRunning: status.isRunning, refreshInProgress: status.refreshInProgress }
+    );
+  }
+
+  // Save daily buy/sell volume status
+  if (dailyBuySellVolumeService) {
+    const status = dailyBuySellVolumeService.getStatus();
+    const recordCount = await databaseService.getBuySellRecordCount();
+    await databaseService.insertServiceHealthSnapshot(
+      'daily_buy_sell_volume',
+      status.initialized,
+      undefined,
+      recordCount,
+      undefined,
+      { isRefreshing: status.isRefreshing, queryConfigured: status.queryIdConfigured }
+    );
+  }
+
+  // Save database metrics
+  const dailyCount = await databaseService.getDailyRecordCount();
+  const hourlyCount = await databaseService.getHourlyRecordCount();
+  const tenMinCount = await databaseService.getTenMinuteRecordCount();
+  const buySellCount = await databaseService.getBuySellRecordCount();
+
+  await databaseService.insertMetricsBatch([
+    { name: 'database_record_count', value: dailyCount, labels: { table: 'daily_volumes' } },
+    { name: 'database_record_count', value: hourlyCount, labels: { table: 'hourly_volumes' } },
+    { name: 'database_record_count', value: tenMinCount, labels: { table: 'ten_minute_volumes' } },
+    { name: 'database_record_count', value: buySellCount, labels: { table: 'daily_buy_sell_volumes' } },
+  ]);
+}
 
 // Force cache refresh endpoint (admin/debug use)
 app.post('/api/cache/refresh', async (req: Request, res: Response) => {
@@ -1185,6 +1674,25 @@ const server = app.listen(config.server.port, async () => {
     console.log('ℹ️ 10-Minute Volume service not available - requires DUNE_API_KEY');
   }
   
+  // Start the Daily Buy/Sell Volume service (tracks directional volume)
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  if (dailyBuySellVolumeService) {
+    console.log('📈 Starting Daily Buy/Sell Volume service...');
+    try {
+      await dailyBuySellVolumeService.initialize();
+      dailyBuySellVolumeService.start();
+      if (dailyBuySellVolumeService.isReady()) {
+        console.log('✅ Daily Buy/Sell Volume service started successfully');
+      } else {
+        console.log('⚠️ Daily Buy/Sell Volume service waiting for data or configuration');
+      }
+    } catch (error) {
+      console.error('❌ Failed to start Daily Buy/Sell Volume service:', error);
+    }
+  } else {
+    console.log('ℹ️ Daily Buy/Sell Volume service not available - requires DUNE_API_KEY');
+  }
+  
   // Start the Dune cache service with hourly refresh
   const duneCacheService = getDuneCacheService();
   if (duneCacheService) {
@@ -1198,6 +1706,37 @@ const server = app.listen(config.server.port, async () => {
   } else {
     console.warn('⚠️ Dune cache service not available - set DUNE_API_KEY to enable caching');
   }
+
+  // Start periodic health snapshots (every 5 minutes)
+  const HEALTH_SNAPSHOT_INTERVAL = 5 * 60 * 1000; // 5 minutes
+  setInterval(async () => {
+    try {
+      await saveHealthSnapshots();
+    } catch (error) {
+      console.error('[Health] Error saving periodic health snapshot:', error);
+    }
+  }, HEALTH_SNAPSHOT_INTERVAL);
+  console.log(`📊 Health snapshots will be saved every ${HEALTH_SNAPSHOT_INTERVAL / 60000} minutes`);
+
+  // Prune old metrics data daily (keep 30 days)
+  const METRICS_PRUNE_INTERVAL = 24 * 60 * 60 * 1000; // 24 hours
+  setInterval(async () => {
+    const databaseService = getDatabaseService();
+    if (databaseService.isAvailable()) {
+      await databaseService.pruneOldMetrics(30);
+    }
+  }, METRICS_PRUNE_INTERVAL);
+  console.log('🧹 Metrics pruning scheduled (keeping last 30 days)');
+
+  // Save initial health snapshot
+  setTimeout(async () => {
+    try {
+      await saveHealthSnapshots();
+      console.log('📊 Initial health snapshot saved');
+    } catch (error) {
+      console.error('[Health] Error saving initial health snapshot:', error);
+    }
+  }, 10000); // Wait 10 seconds for services to stabilize
 });
 
 // Set server timeouts to handle long-running requests (default: 5 minutes)
@@ -1226,6 +1765,10 @@ process.on('SIGTERM', async () => {
   if (tenMinuteVolumeService) {
     tenMinuteVolumeService.stop();
   }
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  if (dailyBuySellVolumeService) {
+    dailyBuySellVolumeService.stop();
+  }
   const databaseService = getDatabaseService();
   if (databaseService) {
     await databaseService.close();
@@ -1253,6 +1796,10 @@ process.on('SIGINT', async () => {
   const tenMinuteVolumeService = getTenMinuteVolumeService();
   if (tenMinuteVolumeService) {
     tenMinuteVolumeService.stop();
+  }
+  const dailyBuySellVolumeService = getDailyBuySellVolumeService();
+  if (dailyBuySellVolumeService) {
+    dailyBuySellVolumeService.stop();
   }
   const databaseService = getDatabaseService();
   if (databaseService) {
