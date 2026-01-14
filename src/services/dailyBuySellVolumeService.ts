@@ -63,6 +63,7 @@ export class DailyBuySellVolumeService {
       }
     } catch (error: any) {
       console.error('[BuySellVolume] Error during initialization:', error.message);
+      console.error('[BuySellVolume] Full error:', error.stack || error);
       // Still mark as initialized if we have existing data
       const recordCount = await this.databaseService.getBuySellRecordCount();
       if (recordCount > 0) {
@@ -218,11 +219,17 @@ export class DailyBuySellVolumeService {
    */
   private async backfillFromStart(): Promise<void> {
     console.log('[BuySellVolume] Starting full backfill from 2025-10-09...');
-    await this.fetchAndStore('2025-10-09');
-    
-    // Mark all historical days as complete (except today)
-    const today = new Date().toISOString().split('T')[0]!;
-    await this.databaseService.markBuySellDaysComplete(today);
+    try {
+      const recordsUpserted = await this.fetchAndStore('2025-10-09');
+      console.log(`[BuySellVolume] Backfill complete, upserted ${recordsUpserted} records`);
+      
+      // Mark all historical days as complete (except today)
+      const today = new Date().toISOString().split('T')[0]!;
+      await this.databaseService.markBuySellDaysComplete(today);
+    } catch (error: any) {
+      console.error(`[BuySellVolume] Backfill failed: ${error.message}`);
+      throw error;
+    }
   }
 
   /**
@@ -245,36 +252,81 @@ export class DailyBuySellVolumeService {
     console.log(`[BuySellVolume] Fetching from Dune query ${config.dune.dailyBuySellVolumeQueryId}`);
     console.log(`[BuySellVolume] Parameters: start_date=${startDate}, tokens=${tokens.length}`);
 
-    const result = await this.duneService.executeQueryManually(
-      config.dune.dailyBuySellVolumeQueryId,
-      {
-        start_date: startDate,
-        token_list: tokenList,
-      }
-    );
+    let result;
+    try {
+      result = await this.duneService.executeQueryManually(
+        config.dune.dailyBuySellVolumeQueryId,
+        {
+          start_date: startDate,
+          token_list: tokenList,
+        }
+      );
+    } catch (duneError: any) {
+      console.error(`[BuySellVolume] Dune query execution failed: ${duneError.message}`);
+      throw duneError;
+    }
 
-    if (!result || !result.rows || result.rows.length === 0) {
-      console.log('[BuySellVolume] No data returned from Dune');
+    if (!result) {
+      console.log('[BuySellVolume] Dune returned null result');
+      return 0;
+    }
+
+    if (!result.rows) {
+      console.log('[BuySellVolume] Dune result has no rows property:', JSON.stringify(result).slice(0, 500));
+      return 0;
+    }
+
+    if (result.rows.length === 0) {
+      console.log('[BuySellVolume] No data returned from Dune (empty rows array)');
       return 0;
     }
 
     console.log(`[BuySellVolume] Received ${result.rows.length} rows from Dune`);
+    
+    // Log sample row for debugging field names
+    try {
+      if (result.rows.length > 0 && result.rows[0]) {
+        const sampleRow = result.rows[0] as unknown as Record<string, unknown>;
+        console.log('[BuySellVolume] Sample row fields:', Object.keys(sampleRow));
+        console.log('[BuySellVolume] Sample row:', JSON.stringify(sampleRow));
+      }
+    } catch (logError: any) {
+      console.error('[BuySellVolume] Error logging sample row:', logError.message);
+    }
 
     // Transform Dune rows to database records
-    const records: DailyBuySellVolumeRecord[] = result.rows.map((row: any) => ({
-      token: row.token,
-      date: row.date?.split('T')[0] || row.trading_date?.split('T')[0],
-      base_volume: String(row.base_volume || 0),
-      target_volume: String(row.target_volume || 0),
-      buy_usdc_volume: String(row.buy_usdc_volume || 0),
-      sell_token_volume: String(row.sell_token_volume || 0),
-      high: String(row.high || 0),
-      low: String(row.low || 0),
-      trade_count: row.trade_count || 0,
-    }));
+    console.log('[BuySellVolume] Transforming rows to database records...');
+    let records: DailyBuySellVolumeRecord[];
+    try {
+      records = result.rows.map((row: any) => ({
+        token: row.token,
+        date: row.date?.split('T')[0] || row.trading_date?.split('T')[0],
+        base_volume: String(row.base_volume || 0),
+        target_volume: String(row.target_volume || 0),
+        buy_usdc_volume: String(row.buy_usdc_volume || 0),
+        sell_token_volume: String(row.sell_token_volume || 0),
+        high: String(row.high || 0),
+        low: String(row.low || 0),
+        trade_count: row.trade_count || 0,
+      }));
+    } catch (transformError: any) {
+      console.error('[BuySellVolume] Error transforming rows:', transformError.message);
+      throw transformError;
+    }
 
     // Filter out invalid records
     const validRecords = records.filter(r => r.token && r.date);
+    const invalidCount = records.length - validRecords.length;
+    
+    console.log(`[BuySellVolume] Transformed ${records.length} rows, ${validRecords.length} valid, ${invalidCount} invalid`);
+    
+    if (invalidCount > 0 && records.length > 0) {
+      // Log a sample invalid record for debugging
+      const invalidSample = records.find(r => !r.token || !r.date);
+      if (invalidSample) {
+        console.log('[BuySellVolume] Sample invalid record:', JSON.stringify(invalidSample));
+      }
+    }
     
     if (validRecords.length === 0) {
       console.log('[BuySellVolume] No valid records to insert');
@@ -282,12 +334,18 @@ export class DailyBuySellVolumeService {
     }
 
     // Check if we should mark historical data as complete
-    const today = new Date().toISOString().split('T')[0];
+    const today = new Date().toISOString().split('T')[0]!;
     const markComplete = true; // We'll mark all fetched data as complete, then unmark today separately
 
-    const upserted = await this.databaseService.upsertDailyBuySellVolumes(validRecords, markComplete);
-    
-    return upserted;
+    console.log(`[BuySellVolume] Upserting ${validRecords.length} records to database...`);
+    try {
+      const upserted = await this.databaseService.upsertDailyBuySellVolumes(validRecords, markComplete);
+      console.log(`[BuySellVolume] Upsert complete: ${upserted} records`);
+      return upserted;
+    } catch (upsertError: any) {
+      console.error('[BuySellVolume] Error upserting to database:', upsertError.message);
+      throw upsertError;
+    }
   }
 
   /**
