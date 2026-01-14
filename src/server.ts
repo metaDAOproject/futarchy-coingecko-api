@@ -328,9 +328,15 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
     const duneCacheService = getDuneCacheService();
     const tenMinuteVolumeService = getTenMinuteVolumeService();
     const hourlyVolumeService = getHourlyVolumeService();
+    const databaseService = getDatabaseService();
     
     // Fetch all DAOs with their pool data
     const allDaos = await futarchyService.getAllDaos();
+    
+    // Get first trade dates for all tokens
+    const firstTradeDates = databaseService?.isAvailable() 
+      ? await databaseService.getFirstTradeDates() 
+      : new Map<string, string>();
     
     // Create mapping from baseMint (token) to DAO address for later lookup
     const tokenToDaoMap = new Map<string, string>();
@@ -513,6 +519,12 @@ app.get('/api/tickers', async (req: Request, res: Response) => {
         }
         if (daoData.treasuryVaultAddress) {
           ticker.treasury_vault_address = daoData.treasuryVaultAddress;
+        }
+
+        // Add startDate (first trade date) if available
+        const startDate = firstTradeDates.get(baseMint.toString().toLowerCase());
+        if (startDate) {
+          ticker.startDate = startDate;
         }
 
         tickers.push(ticker);
@@ -758,6 +770,60 @@ app.post('/api/ten-minute-volume/refresh', async (req: Request, res: Response) =
 // ============================================
 // DAILY BUY/SELL VOLUME ENDPOINTS
 // ============================================
+
+// Get daily buy/sell volume data with date range filtering
+app.get('/api/buy-sell-volume', async (req: Request, res: Response) => {
+  const databaseService = getDatabaseService();
+  
+  if (!databaseService || !databaseService.isAvailable()) {
+    return res.status(503).json({
+      error: 'Database not available',
+      message: 'Service is initializing or database is not connected',
+    });
+  }
+
+  try {
+    const token = req.query.token as string | undefined;
+    const startDate = req.query.startDate as string | undefined;
+    const endDate = req.query.endDate as string | undefined;
+
+    // Validate date format if provided (YYYY-MM-DD)
+    const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
+    if (startDate && !dateRegex.test(startDate)) {
+      return res.status(400).json({
+        error: 'Invalid startDate format',
+        message: 'startDate must be in YYYY-MM-DD format',
+      });
+    }
+    if (endDate && !dateRegex.test(endDate)) {
+      return res.status(400).json({
+        error: 'Invalid endDate format',
+        message: 'endDate must be in YYYY-MM-DD format',
+      });
+    }
+
+    const data = await databaseService.getDailyBuySellVolumes({
+      token,
+      startDate,
+      endDate,
+    });
+    
+    res.json({
+      filters: {
+        token: token || 'all',
+        startDate: startDate || null,
+        endDate: endDate || null,
+      },
+      count: data.length,
+      data,
+    });
+  } catch (error: any) {
+    res.status(500).json({
+      error: 'Failed to get buy/sell volumes',
+      message: error.message,
+    });
+  }
+});
 
 // Buy/sell volume status endpoint
 app.get('/api/buy-sell-volume/status', async (req: Request, res: Response) => {

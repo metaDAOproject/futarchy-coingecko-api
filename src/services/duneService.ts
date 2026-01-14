@@ -77,7 +77,7 @@ export class DuneService {
   private cacheTTL: number = 60000; // 1 minute cache for individual pools
   private batchCacheTTL: number = 300000; // 5 minutes cache for batch queries (Dune queries are heavy)
   private aggregateVolumeCacheTTL: number = 600000; // 10 minutes cache for aggregate volume (heavy historical query)
-  private fetchTimeout: number = 240000; // 4 minutes timeout for Dune API calls
+  private fetchTimeout: number = 600000; // 10 minutes timeout for Dune API calls
   private devMode: boolean;
 
   constructor() {
@@ -555,7 +555,7 @@ ORDER BY base_volume_24h DESC;
     const resultsUrl = `${this.baseUrl}/execution/${executionId}/results?limit=${limit}`;
     
     let attempts = 0;
-    const maxAttempts = 120; // Wait up to 2 minutes (parameterized queries can take longer)
+    const maxAttempts = 180; // Wait up to ~10 minutes (parameterized queries can take longer)
     
     while (attempts < maxAttempts) {
       // Check execution status first

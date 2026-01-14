@@ -1125,49 +1125,21 @@ export class DatabaseService {
    * @param markComplete If true, marks these days as complete (for historical data)
    */
   async upsertDailyBuySellVolumes(records: DailyBuySellVolumeRecord[], markComplete: boolean = false): Promise<number> {
-    // Use console.error to ensure logs aren't buffered/lost
-    console.error(`[Database] === UPSERT START === records=${records.length}, markComplete=${markComplete}`);
-    console.error(`[Database] pool=${!!this.pool}, isConnected=${this.isConnected}`);
-    
-    if (!this.pool) {
-      console.error('[Database] SKIPPING: pool is null');
+    if (!this.pool || !this.isConnected || records.length === 0) {
       return 0;
-    }
-    if (!this.isConnected) {
-      console.error('[Database] SKIPPING: not connected');
-      return 0;
-    }
-    if (records.length === 0) {
-      console.error('[Database] SKIPPING: no records');
-      return 0;
-    }
-    console.error('[Database] All checks passed, proceeding...');
-
-    // Log a sample record to verify data format
-    console.log('[Database] Proceeding with upsert...');
-    try {
-      const sample = records[0]!;
-      console.log(`[Database] Sample: token=${sample.token}, date=${sample.date}, base_vol=${sample.base_volume}`);
-    } catch (e) {
-      console.log('[Database] Could not log sample record');
     }
 
     const BATCH_SIZE = 500;
     let totalUpserted = 0;
 
     try {
-      console.log('[Database] BuySell: Connecting to pool...');
       const client = await this.pool.connect();
-      console.log('[Database] BuySell: Pool connection acquired');
 
       try {
-        console.log('[Database] BuySell: Starting transaction...');
         await client.query('BEGIN');
-        console.log('[Database] BuySell: Transaction started, processing batches...');
 
         for (let i = 0; i < records.length; i += BATCH_SIZE) {
           const batch = records.slice(i, i + BATCH_SIZE);
-          console.log(`[Database] BuySell: Processing batch ${i / BATCH_SIZE + 1}, size ${batch.length}`);
           
           const values: any[] = [];
           const valuePlaceholders: string[] = [];
@@ -1206,23 +1178,18 @@ export class DatabaseService {
               updated_at = CURRENT_TIMESTAMP
           `;
 
-          console.log(`[Database] BuySell: Executing batch SQL with ${values.length} values...`);
           await client.query(batchSQL, values);
           totalUpserted += batch.length;
-          console.log(`[Database] BuySell: Batch complete, total upserted so far: ${totalUpserted}`);
           
           if (records.length > BATCH_SIZE) {
             console.log(`[Database] Buy/sell volume batch progress: ${totalUpserted}/${records.length}`);
           }
         }
 
-        console.log('[Database] BuySell: All batches complete, committing...');
         await client.query('COMMIT');
-        console.log(`[Database] BuySell: COMMITTED ${totalUpserted} daily buy/sell volume records (complete: ${markComplete})`);
+        console.log(`[Database] Upserted ${totalUpserted} daily buy/sell volume records`);
         return totalUpserted;
-      } catch (error: any) {
-        console.error('[Database] BuySell: SQL ERROR:', error.message);
-        console.error('[Database] BuySell: Rolling back...');
+      } catch (error) {
         await client.query('ROLLBACK');
         throw error;
       } finally {
@@ -1294,6 +1261,78 @@ export class DatabaseService {
   }
 
   /**
+   * Get daily buy/sell volumes with date range filtering
+   * @param options.token Filter by specific token
+   * @param options.startDate Start date (inclusive) in YYYY-MM-DD format
+   * @param options.endDate End date (inclusive) in YYYY-MM-DD format
+   */
+  async getDailyBuySellVolumes(options?: {
+    token?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<{
+    token: string;
+    date: string;
+    base_volume: string;
+    target_volume: string;
+    buy_usdc_volume: string;
+    sell_token_volume: string;
+    high: string;
+    low: string;
+    trade_count: number;
+  }[]> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let paramIndex = 1;
+
+      if (options?.token) {
+        conditions.push(`LOWER(token) = LOWER($${paramIndex})`);
+        params.push(options.token);
+        paramIndex++;
+      }
+
+      if (options?.startDate) {
+        conditions.push(`date >= $${paramIndex}`);
+        params.push(options.startDate);
+        paramIndex++;
+      }
+
+      if (options?.endDate) {
+        conditions.push(`date <= $${paramIndex}`);
+        params.push(options.endDate);
+        paramIndex++;
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const result = await this.pool.query(
+        `SELECT 
+          token,
+          date::text,
+          base_volume::text,
+          target_volume::text,
+          buy_usdc_volume::text,
+          sell_token_volume::text,
+          high::text,
+          low::text,
+          trade_count
+         FROM daily_buy_sell_volumes
+         ${whereClause}
+         ORDER BY token, date ASC`,
+        params
+      );
+
+      return result.rows;
+    } catch (error: any) {
+      console.error('[Database] Error getting daily buy/sell volumes:', error.message);
+      return [];
+    }
+  }
+
+  /**
    * Get aggregated buy/sell stats for all tokens
    */
   async getBuySellAggregates(tokens?: string[]): Promise<Map<string, {
@@ -1349,6 +1388,31 @@ export class DatabaseService {
       return aggregates;
     } catch (error: any) {
       console.error('[Database] Error getting buy/sell aggregates:', error.message);
+      return new Map();
+    }
+  }
+
+  /**
+   * Get the first trade date for each token (when trading started)
+   * Returns a Map of token address -> first trade date (YYYY-MM-DD)
+   */
+  async getFirstTradeDates(): Promise<Map<string, string>> {
+    if (!this.pool || !this.isConnected) return new Map();
+
+    try {
+      const result = await this.pool.query(
+        `SELECT token, MIN(date)::text AS first_date
+         FROM daily_buy_sell_volumes
+         GROUP BY token`
+      );
+
+      const map = new Map<string, string>();
+      for (const row of result.rows) {
+        map.set(row.token.toLowerCase(), row.first_date);
+      }
+      return map;
+    } catch (error: any) {
+      console.error('[Database] Error getting first trade dates:', error.message);
       return new Map();
     }
   }

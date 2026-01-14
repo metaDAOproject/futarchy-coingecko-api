@@ -17,6 +17,7 @@ export interface CoinGeckoTicker {
   low_24h?: string;
   treasury_usdc_aum?: string;
   treasury_vault_address?: string;
+  startDate?: string;
 }
 
 export interface CoinGeckoHistoricalTrade {
