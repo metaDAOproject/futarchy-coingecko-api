@@ -16,6 +16,7 @@ import {
 import { getAccount, getAssociatedTokenAddress } from '@solana/spl-token';
 import { config } from '../config.js';
 import BN from 'bn.js';
+import { logger } from '../utils/logger.js';
 
 // Launchpad version detection
 export type LaunchpadVersion = 'v0.6' | 'v0.7';
@@ -164,14 +165,6 @@ export class LaunchpadService {
     return this.clientV07.getLaunchAddress({ baseMint });
   }
 
-  /**
-   * Get the Launch PDA address for a given base mint
-   * @deprecated Use getLaunchAddressV06 or getLaunchAddressV07 depending on which program was used
-   */
-  getLaunchAddress(baseMint: PublicKey): PublicKey {
-    // Default to v0.6 for backwards compatibility
-    return this.getLaunchAddressV06(baseMint);
-  }
 
   /**
    * Fetch a Launch account by its address from the specified program
@@ -184,13 +177,12 @@ export class LaunchpadService {
       const client = version === 'v0.7' ? this.clientV07 : this.clientV06;
       const launch = await client.fetchLaunch(launchAddress);
       if (launch) {
-        console.log(`[Launchpad] Found launch in ${version} program at ${launchAddress.toString()}`);
+        logger.info(`[Launchpad] Found launch in ${version} program at ${launchAddress.toString()}`);
         return { launch, version };
       }
     } catch (error: any) {
-      // Log the error for debugging but don't fail - the launch might be on the other program
       if (!error.message?.includes('Account does not exist')) {
-        console.log(`[Launchpad] Error fetching ${version} launch at ${launchAddress.toString()}: ${error.message}`);
+        logger.info(`[Launchpad] Error fetching ${version} launch at ${launchAddress.toString()}: ${error.message}`);
       }
     }
     return null;
@@ -237,7 +229,7 @@ export class LaunchpadService {
       this.setCache(cacheKey, launchData);
       return launchData;
     } catch (error) {
-      console.error(`Error fetching launch ${launchAddress.toString()}:`, error);
+      logger.error(`Error fetching launch ${launchAddress.toString()}`, error);
       return null;
     }
   }
@@ -251,24 +243,23 @@ export class LaunchpadService {
     const cached = this.getCached<LaunchData>(cacheKey, config.cache.tickersTTL * 10);
     if (cached) return cached;
 
-    // Try v0.7 program first (newer launches)
     const launchAddressV07 = this.getLaunchAddressV07(baseMint);
-    console.log(`[Launchpad] Checking v0.7 launch at ${launchAddressV07.toString()} for mint ${baseMint.toString()}`);
+    logger.info(`[Launchpad] Checking v0.7 launch at ${launchAddressV07.toString()} for mint ${baseMint.toString()}`);
     let launch = await this.fetchLaunchFromProgram(launchAddressV07, 'v0.7');
     
     // If not found in v0.7, try v0.6
     if (!launch) {
       const launchAddressV06 = this.getLaunchAddressV06(baseMint);
-      console.log(`[Launchpad] v0.7 not found, checking v0.6 launch at ${launchAddressV06.toString()}`);
+      logger.debug(`[Launchpad] v0.7 not found, checking v0.6 launch at ${launchAddressV06.toString()}`);
       launch = await this.fetchLaunchFromProgram(launchAddressV06, 'v0.6');
     }
 
     if (!launch) {
-      console.log(`[Launchpad] No launch found for mint ${baseMint.toString()}`);
+      logger.debug(`[Launchpad] No launch found for mint ${baseMint.toString()}`);
       return null;
     }
 
-    console.log(`[Launchpad] Found ${launch.version} launch for mint ${baseMint.toString()}`);
+    logger.debug(`[Launchpad] Found ${launch.version} launch for mint ${baseMint.toString()}`);
     
 
     const { launch: launchAccount, version } = launch;
@@ -329,7 +320,7 @@ export class LaunchpadService {
           });
         }
       } catch (error) {
-        console.warn('[Launchpad] Error fetching v0.7 launches:', error);
+        logger.warn('[Launchpad] Error fetching v0.7 launches', { error: error instanceof Error ? error.message : String(error) });
       }
 
       // Fetch from v0.6 program (older launches)
@@ -352,13 +343,13 @@ export class LaunchpadService {
           });
         }
       } catch (error) {
-        console.warn('[Launchpad] Error fetching v0.6 launches:', error);
+        logger.warn('[Launchpad] Error fetching v0.6 launches', { error: error instanceof Error ? error.message : String(error) });
       }
 
       this.setCache(cacheKey, launches);
       return launches;
     } catch (error) {
-      console.error('Error fetching all launches:', error);
+      logger.error('[Launchpad] Error fetching all launches', error);
       return [];
     }
   }
@@ -393,7 +384,7 @@ export class LaunchpadService {
       this.setCache(cacheKey, packageData);
       return packageData;
     } catch (error) {
-      console.error(`Error fetching performance package ${performancePackageAddress.toString()}:`, error);
+      logger.error(`[Launchpad] Error fetching performance package ${performancePackageAddress.toString()}`, error);
       return null;
     }
   }
@@ -511,7 +502,7 @@ export class LaunchpadService {
 
       return { amount, vaultAddress };
     } catch (error) {
-      console.error(`Error fetching FutarchyAMM liquidity for DAO ${daoAddress.toString()}:`, error);
+      logger.error(`[Launchpad] Error fetching FutarchyAMM liquidity for DAO ${daoAddress.toString()}`, error);
       return { amount: new BN(0) };
     }
   }
@@ -541,16 +532,15 @@ export class LaunchpadService {
       const poolAddress = this.getMeteoraPoolAddress(baseMint, quoteMint, version);
       const vaultAddress = this.getMeteoraPoolVault(poolAddress, baseMint);
       
-      console.log(`[Meteora] Checking ${version} pool ${poolAddress.toString()} (config: ${meteoraConfig.toString().slice(0, 8)}...) vault ${vaultAddress.toString()} for ${baseMint.toString()}`);
+      logger.info(`[Meteora] Checking ${version} pool ${poolAddress.toString()} (config: ${meteoraConfig.toString().slice(0, 8)}...) vault ${vaultAddress.toString()} for ${baseMint.toString()}`);
       
       const tokenAccount = await getAccount(this.connection, vaultAddress);
       const amount = new BN(tokenAccount.amount.toString());
 
-      console.log(`[Meteora] Found ${amount.toString()} tokens in Meteora ${version} pool`);
+      logger.info(`[Meteora] Found ${amount.toString()} tokens in Meteora ${version} pool`);
       return { amount, poolAddress, vaultAddress };
     } catch (error: any) {
-      // Pool might not exist or vault might be empty - log more details
-      console.log(`[Meteora] ${version} pool lookup failed for ${baseMint.toString()}: ${error.message || 'Unknown error'}`);
+      logger.info(`[Meteora] ${version} pool lookup failed for ${baseMint.toString()}: ${error.message || 'Unknown error'}`);
       
       // If we tried v0.7 and failed, don't try v0.6 as fallback - the version is determined by the launch
       return { amount: new BN(0) };
@@ -627,7 +617,7 @@ export class LaunchpadService {
             launch.additionalTokensRecipient
           );
         } catch (error) {
-          console.warn(`[Launchpad] Could not derive additional tokens account for ${launch.additionalTokensRecipient.toString()}`);
+          logger.warn(`[Launchpad] Could not derive additional tokens account for ${launch.additionalTokensRecipient.toString()}`);
         }
 
         additionalTokenAllocation = {
@@ -670,38 +660,11 @@ export class LaunchpadService {
       this.setCache(cacheKey, breakdown);
       return breakdown;
     } catch (error) {
-      console.error(`Error getting token allocation breakdown for ${baseMint.toString()}:`, error);
+      logger.error(`Error getting token allocation breakdown for ${baseMint.toString()}`, error);
       return emptyBreakdown;
     }
   }
 
-  /**
-   * @deprecated Use getTokenAllocationBreakdown instead
-   * Get the amount of tokens locked in performance packages for a given token mint.
-   */
-  async getLockedPerformancePackageInfo(baseMint: PublicKey): Promise<{
-    lockedAmount: BN;
-    performancePackageAddress?: PublicKey;
-    polAmount?: BN;
-    ammBaseVault?: PublicKey;
-  }> {
-    const breakdown = await this.getTokenAllocationBreakdown(baseMint);
-    return {
-      lockedAmount: breakdown.teamPerformancePackage.amount,
-      performancePackageAddress: breakdown.teamPerformancePackage.address,
-      polAmount: breakdown.futarchyAmmLiquidity.amount.add(breakdown.meteoraLpLiquidity.amount),
-      ammBaseVault: breakdown.futarchyAmmLiquidity.vaultAddress,
-    };
-  }
-
-  /**
-   * @deprecated Use getLockedPerformancePackageInfo instead
-   * Get the amount of tokens locked in performance packages for a given token mint.
-   */
-  async getLockedPerformancePackageAmount(baseMint: PublicKey): Promise<BN> {
-    const info = await this.getLockedPerformancePackageInfo(baseMint);
-    return info.lockedAmount;
-  }
 
   /**
    * Build a map of baseMint -> lockedAmount for all launched tokens
@@ -740,7 +703,7 @@ export class LaunchpadService {
       this.setCache(cacheKey, lockedAmountsMap);
       return lockedAmountsMap;
     } catch (error) {
-      console.error('Error building locked amounts map:', error);
+      logger.error('Error building locked amounts map', error);
       return lockedAmountsMap;
     }
   }
@@ -801,7 +764,7 @@ export class LaunchpadService {
       this.setCache(cacheKey, detailedMap);
       return detailedMap;
     } catch (error) {
-      console.error('Error building detailed locked amounts map:', error);
+      logger.error('Error building detailed locked amounts map', error);
       return detailedMap;
     }
   }

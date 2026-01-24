@@ -1,10 +1,10 @@
 import request from 'supertest';
 import BN from 'bn.js';
 import { PublicKey } from '@solana/web3.js';
-import { FutarchyService, DaoTickerData } from '../src/services/futarchyService.js';
-import { PriceService } from '../src/services/priceService.js';
-import { setFutarchyService, setPriceService } from '../src/server.js';
-import app from '../src/server.js';
+import { createApp, type Services } from '../src/app.js';
+import type { FutarchyService, DaoTickerData } from '../src/services/futarchyService.js';
+import type { PriceService } from '../src/services/priceService.js';
+import type { DatabaseService } from '../src/services/databaseService.js';
 
 // Mock DAO data
 const mockBaseMint = new PublicKey('SoLo9oxzLDpcq1dpqAgMwgce5WqkRDtNXK7EPnbmeta');
@@ -42,30 +42,41 @@ const mockFutarchyService = {
 } as unknown as FutarchyService;
 
 const mockPriceService = {
-  calculatePrice: jest.fn((baseReserves: BN, quoteReserves: BN, baseDecimals: number, quoteDecimals: number) => {
-    return '0.05';
-  }),
-  calculateSpread: jest.fn((price: number) => ({
+  calculatePrice: jest.fn(() => '0.05'),
+  calculateSpread: jest.fn(() => ({
     bid: '0.04975',
     ask: '0.05025',
   })),
-  calculateLiquidityUSD: jest.fn((quoteReserves: BN, decimals: number) => {
-    return '100000.00';
-  }),
-  calculateVolumeFromFees: jest.fn((baseFees: BN, quoteFees: BN, baseDecimals: number, quoteDecimals: number, feeRate: number) => {
-    return {
-      baseVolume: '40.00000000',
-      targetVolume: '2.00000000',
-    };
-  }),
+  calculateLiquidityUSD: jest.fn(() => '100000.00'),
+  calculateVolumeFromFees: jest.fn(() => ({
+    baseVolume: '40.00000000',
+    targetVolume: '2.00000000',
+  })),
 } as unknown as PriceService;
 
+const mockDatabaseService = {
+  isAvailable: jest.fn().mockReturnValue(true),
+  getFirstTradeDates: jest.fn().mockResolvedValue(new Map()),
+} as unknown as DatabaseService;
+
+function createMockServices(): Services {
+  return {
+    futarchyService: mockFutarchyService,
+    priceService: mockPriceService,
+    databaseService: mockDatabaseService,
+    duneService: null,
+    duneCacheService: null,
+    solanaService: undefined,
+    launchpadService: undefined,
+    hourlyAggregationService: null,
+    tenMinuteVolumeFetcherService: null,
+    dailyAggregationService: null,
+    meteoraVolumeFetcherService: null,
+  };
+}
+
 describe('CoinGecko API', () => {
-  beforeAll(() => {
-    // Set mocks before any routes are accessed
-    setFutarchyService(mockFutarchyService);
-    setPriceService(mockPriceService);
-  });
+  const app = createApp({ services: createMockServices() });
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -104,9 +115,13 @@ describe('CoinGecko API', () => {
       expect(mockFutarchyService.getAllDaos).toHaveBeenCalled();
     });
 
-    it('should calculate volume from fees', async () => {
-      await request(app).get('/api/tickers');
-      expect(mockPriceService.calculateVolumeFromFees).toHaveBeenCalled();
+    it('should return zero volume when no metrics available', async () => {
+      const response = await request(app).get('/api/tickers');
+      expect(response.status).toBe(200);
+      if (response.body.length > 0) {
+        expect(response.body[0].base_volume).toBe('0');
+        expect(response.body[0].target_volume).toBe('0');
+      }
     });
   });
 

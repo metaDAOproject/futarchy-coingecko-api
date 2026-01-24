@@ -1,5 +1,6 @@
 import pg from 'pg';
 import { config } from '../config.js';
+import { logger } from '../utils/logger.js';
 
 const { Pool } = pg;
 
@@ -8,8 +9,20 @@ export interface DailyVolumeRecord {
   date: string; // YYYY-MM-DD
   base_volume: string;
   target_volume: string;
+  buy_volume?: string;
+  sell_volume?: string;
   high: string;
   low: string;
+  average_price?: string;
+  trade_count?: number;
+  usdc_fees?: string;
+  token_fees?: string;
+  token_fees_usdc?: string;
+  sell_volume_usdc?: string;
+  cumulative_usdc_fees?: string;
+  cumulative_token_in_usdc_fees?: string;
+  cumulative_target_volume?: string;
+  cumulative_token_volume?: string;
 }
 
 export interface HourlyVolumeRecord {
@@ -17,9 +30,16 @@ export interface HourlyVolumeRecord {
   hour: string; // ISO timestamp (YYYY-MM-DD HH:00:00)
   base_volume: string;
   target_volume: string;
+  buy_volume?: string;
+  sell_volume?: string;
   high: string;
   low: string;
+  average_price?: string;
   trade_count: number;
+  usdc_fees?: string;
+  token_fees?: string;
+  token_fees_usdc?: string;
+  sell_volume_usdc?: string;
 }
 
 export interface TenMinuteVolumeRecord {
@@ -27,9 +47,16 @@ export interface TenMinuteVolumeRecord {
   bucket: string; // ISO timestamp (YYYY-MM-DD HH:M0:00 where M is 0,1,2,3,4,5)
   base_volume: string;
   target_volume: string;
+  buy_volume?: string;
+  sell_volume?: string;
   high: string;
   low: string;
+  average_price?: string;
   trade_count: number;
+  usdc_fees?: string;
+  token_fees?: string;
+  token_fees_usdc?: string;
+  sell_volume_usdc?: string;
 }
 
 export interface DailyBuySellVolumeRecord {
@@ -42,6 +69,44 @@ export interface DailyBuySellVolumeRecord {
   high: string;
   low: string;
   trade_count: number;
+}
+
+export interface DailyFeesVolumeRecord {
+  token: string;
+  trading_date: string; // YYYY-MM-DD
+  base_volume: string;
+  target_volume: string;
+  usdc_fees: string;
+  token_fees_usdc: string;
+  token_fees: string;
+  buy_volume: string;
+  sell_volume: string;
+  sell_volume_usdc: string;
+  cumulative_usdc_fees: string;
+  cumulative_token_in_usdc_fees: string;
+  cumulative_target_volume: string;
+  cumulative_token_volume: string;
+  high: string;
+  average_price: string;
+  low: string;
+}
+
+export interface DailyMeteoraVolumeRecord {
+  token: string;  // mapped from owner
+  date: string;    // YYYY-MM-DD
+  base_volume: string;  // volume_usd_approx
+  target_volume: string;  // calculated from buy_volume + sell_volume
+  trade_count: number;  // num_swaps
+  buy_volume: string;
+  sell_volume: string;
+  usdc_fees: string;  // lp_fee_usdc
+  token_fees: string;  // lp_fee_token
+  token_fees_usdc: string;  // lp_fee_token_usdc
+  token_per_usdc: string;  // token_per_usdc_raw
+  average_price: string;  // token_price_usdc
+  ownership_share: string;  // ownership_share
+  earned_fee_usdc: string;  // earned_fee_usdc
+  is_complete: boolean;
 }
 
 export interface CumulativeVolumeData {
@@ -81,7 +146,7 @@ export interface TokenVolumeAggregate {
 }
 
 export class DatabaseService {
-  private pool: pg.Pool | null = null;
+  public pool: pg.Pool | null = null;
   private isConnected: boolean = false;
 
   constructor() {
@@ -107,22 +172,26 @@ export class DatabaseService {
    */
   async initialize(): Promise<boolean> {
     if (!this.pool) {
-      console.log('[Database] No database configuration provided, volume history will use in-memory cache only');
+      logger.info('[Database] No database configuration provided, volume history will use in-memory cache only');
       return false;
     }
 
     try {
       // Test connection
       const client = await this.pool.connect();
-      console.log('[Database] Connected to PostgreSQL');
+      logger.info('[Database] Connected to PostgreSQL');
       client.release();
 
       // Create tables
       await this.createTables();
+      
+      // Create aggregation functions
+      await this.createAggregationFunctions();
+      
       this.isConnected = true;
       return true;
     } catch (error: any) {
-      console.error('[Database] Failed to connect:', error.message);
+      logger.error('[Database] Failed to connect:', error);
       this.isConnected = false;
       return false;
     }
@@ -135,14 +204,28 @@ export class DatabaseService {
     if (!this.pool) return;
 
     const createTableSQL = `
+      -- Daily volumes table (aggregated from hourly/10-min data, includes cumulative values)
       CREATE TABLE IF NOT EXISTS daily_volumes (
         id SERIAL PRIMARY KEY,
         token VARCHAR(64) NOT NULL,
         date DATE NOT NULL,
         base_volume NUMERIC(40, 12) NOT NULL,
         target_volume NUMERIC(40, 12) NOT NULL,
+        buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
         high NUMERIC(40, 12) NOT NULL,
         low NUMERIC(40, 12) NOT NULL,
+        average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        trade_count INT NOT NULL DEFAULT 0,
+        usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_token_in_usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_target_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_token_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        is_complete BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(token, date)
@@ -152,16 +235,23 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_daily_volumes_date ON daily_volumes(date);
       CREATE INDEX IF NOT EXISTS idx_daily_volumes_token_date ON daily_volumes(token, date);
 
-      -- Hourly volumes table for hourly aggregates
+      -- Hourly volumes table for hourly aggregates (aggregated from 10-min data)
       CREATE TABLE IF NOT EXISTS hourly_volumes (
         id SERIAL PRIMARY KEY,
         token VARCHAR(64) NOT NULL,
         hour TIMESTAMPTZ NOT NULL,
         base_volume NUMERIC(40, 12) NOT NULL,
         target_volume NUMERIC(40, 12) NOT NULL,
+        buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
         high NUMERIC(40, 12) NOT NULL,
         low NUMERIC(40, 12) NOT NULL,
+        average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
         trade_count INT NOT NULL DEFAULT 0,
+        usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
         is_complete BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -174,15 +264,23 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_hourly_volumes_recent ON hourly_volumes(hour DESC);
 
       -- 10-minute volumes table for accurate rolling 24h calculations
+      -- Extended with buy/sell volumes and fees (single source of truth)
       CREATE TABLE IF NOT EXISTS ten_minute_volumes (
         id SERIAL PRIMARY KEY,
         token VARCHAR(64) NOT NULL,
         bucket TIMESTAMPTZ NOT NULL,
         base_volume NUMERIC(40, 12) NOT NULL,
         target_volume NUMERIC(40, 12) NOT NULL,
+        buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
         high NUMERIC(40, 12) NOT NULL,
         low NUMERIC(40, 12) NOT NULL,
+        average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
         trade_count INT NOT NULL DEFAULT 0,
+        usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
         is_complete BOOLEAN NOT NULL DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
@@ -223,6 +321,63 @@ export class DatabaseService {
       CREATE INDEX IF NOT EXISTS idx_daily_buy_sell_volumes_date ON daily_buy_sell_volumes(date);
       CREATE INDEX IF NOT EXISTS idx_daily_buy_sell_volumes_token_date ON daily_buy_sell_volumes(token, date);
 
+      -- Daily fees volumes table for tracking fees and comprehensive volume metrics
+      CREATE TABLE IF NOT EXISTS daily_fees_volumes (
+        id SERIAL PRIMARY KEY,
+        token VARCHAR(64) NOT NULL,
+        trading_date DATE NOT NULL,
+        base_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        target_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_token_in_usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_target_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        cumulative_token_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        high NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        low NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        is_complete BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(token, trading_date)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_daily_fees_volumes_token ON daily_fees_volumes(token);
+      CREATE INDEX IF NOT EXISTS idx_daily_fees_volumes_date ON daily_fees_volumes(trading_date);
+      CREATE INDEX IF NOT EXISTS idx_daily_fees_volumes_token_date ON daily_fees_volumes(token, trading_date);
+
+      -- Daily Meteora volumes table for tracking Meteora pool fees and volumes per owner
+      CREATE TABLE IF NOT EXISTS daily_meteora_volumes (
+        id SERIAL PRIMARY KEY,
+        token VARCHAR(64) NOT NULL,
+        date DATE NOT NULL,
+        base_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        target_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        trade_count INT NOT NULL DEFAULT 0,
+        buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        token_per_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        ownership_share NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        earned_fee_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+        is_complete BOOLEAN NOT NULL DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(token, date)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_daily_meteora_volumes_token ON daily_meteora_volumes(token);
+      CREATE INDEX IF NOT EXISTS idx_daily_meteora_volumes_date ON daily_meteora_volumes(date);
+      CREATE INDEX IF NOT EXISTS idx_daily_meteora_volumes_token_date ON daily_meteora_volumes(token, date);
+
       -- Metrics history table for storing periodic snapshots of system metrics
       CREATE TABLE IF NOT EXISTS metrics_history (
         id SERIAL PRIMARY KEY,
@@ -255,7 +410,297 @@ export class DatabaseService {
     `;
 
     await this.pool.query(createTableSQL);
-    console.log('[Database] Tables created/verified');
+    logger.info('[Database] Tables created/verified');
+    
+    // Run migration to add new columns to existing tables
+    await this.migrateTables();
+  }
+
+  /**
+   * Migrate existing tables to add new columns for extended fields
+   * This is safe to run multiple times (uses IF NOT EXISTS logic)
+   */
+  private async migrateTables(): Promise<void> {
+    if (!this.pool) return;
+
+    try {
+      const migrationSQL = `
+        -- Add extended columns to ten_minute_volumes
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_name = 'ten_minute_volumes' AND column_name = 'buy_volume') THEN
+            ALTER TABLE ten_minute_volumes 
+            ADD COLUMN buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0;
+            RAISE NOTICE 'Added extended columns to ten_minute_volumes';
+          END IF;
+        END $$;
+
+        -- Add extended columns to hourly_volumes
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_name = 'hourly_volumes' AND column_name = 'buy_volume') THEN
+            ALTER TABLE hourly_volumes 
+            ADD COLUMN buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0;
+            RAISE NOTICE 'Added extended columns to hourly_volumes';
+          END IF;
+        END $$;
+
+        -- Add extended columns to daily_volumes
+        DO $$ 
+        BEGIN
+          IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                         WHERE table_name = 'daily_volumes' AND column_name = 'buy_volume') THEN
+            ALTER TABLE daily_volumes 
+            ADD COLUMN buy_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN sell_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN average_price NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN trade_count INT NOT NULL DEFAULT 0,
+            ADD COLUMN usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN token_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN token_fees_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN sell_volume_usdc NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN cumulative_usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN cumulative_token_in_usdc_fees NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN cumulative_target_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN cumulative_token_volume NUMERIC(40, 12) NOT NULL DEFAULT 0,
+            ADD COLUMN is_complete BOOLEAN NOT NULL DEFAULT false;
+            RAISE NOTICE 'Added extended columns to daily_volumes';
+          END IF;
+        END $$;
+      `;
+
+      await this.pool.query(migrationSQL);
+      logger.info('[Database] Migration completed - extended columns added if needed');
+    } catch (error: any) {
+      // Migration errors are non-fatal - tables might already have columns
+      logger.info('[Database] Migration check completed (columns may already exist)');
+    }
+  }
+
+  /**
+   * Create database aggregation functions for 10-min → hourly → daily
+   */
+  async createAggregationFunctions(): Promise<void> {
+    if (!this.pool) return;
+
+    try {
+      const functionsSQL = `
+        -- Function to aggregate 10-minute buckets into hourly records
+        CREATE OR REPLACE FUNCTION aggregate_10min_to_hourly(
+          p_token VARCHAR DEFAULT NULL,
+          p_hour TIMESTAMPTZ DEFAULT NULL
+        )
+        RETURNS TABLE (
+          token VARCHAR,
+          hour TIMESTAMPTZ,
+          base_volume NUMERIC,
+          target_volume NUMERIC,
+          buy_volume NUMERIC,
+          sell_volume NUMERIC,
+          high NUMERIC,
+          low NUMERIC,
+          average_price NUMERIC,
+          trade_count INT,
+          usdc_fees NUMERIC,
+          token_fees NUMERIC,
+          token_fees_usdc NUMERIC,
+          sell_volume_usdc NUMERIC
+        ) AS $$
+        BEGIN
+          RETURN QUERY
+          SELECT
+            tmv.token,
+            date_trunc('hour', tmv.bucket) AS hour,
+            SUM(tmv.base_volume)::NUMERIC AS base_volume,
+            SUM(tmv.target_volume)::NUMERIC AS target_volume,
+            SUM(tmv.buy_volume)::NUMERIC AS buy_volume,
+            SUM(tmv.sell_volume)::NUMERIC AS sell_volume,
+            MAX(tmv.high)::NUMERIC AS high,
+            MIN(CASE WHEN tmv.low > 0 THEN tmv.low END)::NUMERIC AS low,
+            -- Weighted average price by volume
+            CASE 
+              WHEN SUM(tmv.base_volume) > 0 
+              THEN SUM(tmv.average_price * tmv.base_volume) / SUM(tmv.base_volume)
+              ELSE AVG(tmv.average_price)
+            END::NUMERIC AS average_price,
+            SUM(tmv.trade_count)::INT AS trade_count,
+            SUM(tmv.usdc_fees)::NUMERIC AS usdc_fees,
+            SUM(tmv.token_fees)::NUMERIC AS token_fees,
+            SUM(tmv.token_fees_usdc)::NUMERIC AS token_fees_usdc,
+            SUM(tmv.sell_volume_usdc)::NUMERIC AS sell_volume_usdc
+          FROM ten_minute_volumes tmv
+          WHERE 
+            (p_token IS NULL OR tmv.token = p_token)
+            AND (p_hour IS NULL OR date_trunc('hour', tmv.bucket) = p_hour)
+          GROUP BY tmv.token, date_trunc('hour', tmv.bucket)
+          ORDER BY tmv.token, hour;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        -- Function to aggregate hourly records into daily records with cumulative values
+        CREATE OR REPLACE FUNCTION aggregate_hourly_to_daily(
+          p_token VARCHAR DEFAULT NULL,
+          p_date DATE DEFAULT NULL
+        )
+        RETURNS TABLE (
+          token VARCHAR,
+          date DATE,
+          base_volume NUMERIC,
+          target_volume NUMERIC,
+          buy_volume NUMERIC,
+          sell_volume NUMERIC,
+          high NUMERIC,
+          low NUMERIC,
+          average_price NUMERIC,
+          trade_count INT,
+          usdc_fees NUMERIC,
+          token_fees NUMERIC,
+          token_fees_usdc NUMERIC,
+          sell_volume_usdc NUMERIC,
+          cumulative_usdc_fees NUMERIC,
+          cumulative_token_in_usdc_fees NUMERIC,
+          cumulative_target_volume NUMERIC,
+          cumulative_token_volume NUMERIC
+        ) AS $$
+        BEGIN
+          RETURN QUERY
+          WITH daily_agg AS (
+            SELECT
+              hv.token,
+              date_trunc('day', hv.hour)::DATE AS date,
+              SUM(hv.base_volume)::NUMERIC AS base_volume,
+              SUM(hv.target_volume)::NUMERIC AS target_volume,
+              SUM(hv.buy_volume)::NUMERIC AS buy_volume,
+              SUM(hv.sell_volume)::NUMERIC AS sell_volume,
+              MAX(hv.high)::NUMERIC AS high,
+              MIN(CASE WHEN hv.low > 0 THEN hv.low END)::NUMERIC AS low,
+              -- Weighted average price by volume
+              CASE 
+                WHEN SUM(hv.base_volume) > 0 
+                THEN SUM(hv.average_price * hv.base_volume) / SUM(hv.base_volume)
+                ELSE AVG(hv.average_price)
+              END::NUMERIC AS average_price,
+              SUM(hv.trade_count)::INT AS trade_count,
+              SUM(hv.usdc_fees)::NUMERIC AS usdc_fees,
+              SUM(hv.token_fees)::NUMERIC AS token_fees,
+              SUM(hv.token_fees_usdc)::NUMERIC AS token_fees_usdc,
+              SUM(hv.sell_volume_usdc)::NUMERIC AS sell_volume_usdc
+            FROM hourly_volumes hv
+            WHERE 
+              (p_token IS NULL OR hv.token = p_token)
+              AND (p_date IS NULL OR date_trunc('day', hv.hour)::DATE = p_date)
+            GROUP BY hv.token, date_trunc('day', hv.hour)::DATE
+          )
+          SELECT
+            da.token,
+            da.date,
+            da.base_volume,
+            da.target_volume,
+            da.buy_volume,
+            da.sell_volume,
+            da.high,
+            da.low,
+            da.average_price,
+            da.trade_count,
+            da.usdc_fees,
+            da.token_fees,
+            da.token_fees_usdc,
+            da.sell_volume_usdc,
+            SUM(da.usdc_fees) OVER (
+              PARTITION BY da.token
+              ORDER BY da.date
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )::NUMERIC AS cumulative_usdc_fees,
+            SUM(da.token_fees_usdc) OVER (
+              PARTITION BY da.token
+              ORDER BY da.date
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )::NUMERIC AS cumulative_token_in_usdc_fees,
+            SUM(da.target_volume) OVER (
+              PARTITION BY da.token
+              ORDER BY da.date
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )::NUMERIC AS cumulative_target_volume,
+            SUM(da.base_volume) OVER (
+              PARTITION BY da.token
+              ORDER BY da.date
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            )::NUMERIC AS cumulative_token_volume
+          FROM daily_agg da
+          ORDER BY da.token, da.date;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        -- Function to calculate rolling 24h metrics from 10-minute data
+        CREATE OR REPLACE FUNCTION calculate_rolling_24h(
+          p_token VARCHAR DEFAULT NULL
+        )
+        RETURNS TABLE (
+          token VARCHAR,
+          base_volume_24h NUMERIC,
+          target_volume_24h NUMERIC,
+          buy_volume_24h NUMERIC,
+          sell_volume_24h NUMERIC,
+          high_24h NUMERIC,
+          low_24h NUMERIC,
+          average_price_24h NUMERIC,
+          trade_count_24h INT,
+          usdc_fees_24h NUMERIC,
+          token_fees_24h NUMERIC,
+          token_fees_usdc_24h NUMERIC,
+          sell_volume_usdc_24h NUMERIC
+        ) AS $$
+        BEGIN
+          RETURN QUERY
+          SELECT
+            tmv.token,
+            SUM(tmv.base_volume)::NUMERIC AS base_volume_24h,
+            SUM(tmv.target_volume)::NUMERIC AS target_volume_24h,
+            SUM(tmv.buy_volume)::NUMERIC AS buy_volume_24h,
+            SUM(tmv.sell_volume)::NUMERIC AS sell_volume_24h,
+            MAX(tmv.high)::NUMERIC AS high_24h,
+            MIN(CASE WHEN tmv.low > 0 THEN tmv.low END)::NUMERIC AS low_24h,
+            -- Weighted average price by volume
+            CASE 
+              WHEN SUM(tmv.base_volume) > 0 
+              THEN SUM(tmv.average_price * tmv.base_volume) / SUM(tmv.base_volume)
+              ELSE AVG(tmv.average_price)
+            END::NUMERIC AS average_price_24h,
+            SUM(tmv.trade_count)::INT AS trade_count_24h,
+            SUM(tmv.usdc_fees)::NUMERIC AS usdc_fees_24h,
+            SUM(tmv.token_fees)::NUMERIC AS token_fees_24h,
+            SUM(tmv.token_fees_usdc)::NUMERIC AS token_fees_usdc_24h,
+            SUM(tmv.sell_volume_usdc)::NUMERIC AS sell_volume_usdc_24h
+          FROM ten_minute_volumes tmv
+          WHERE 
+            tmv.bucket >= (CURRENT_TIMESTAMP - INTERVAL '24 hours')
+            AND (p_token IS NULL OR tmv.token = p_token)
+          GROUP BY tmv.token
+          ORDER BY tmv.token;
+        END;
+        $$ LANGUAGE plpgsql;
+      `;
+
+      await this.pool.query(functionsSQL);
+      logger.info('[Database] Aggregation functions created/updated');
+    } catch (error: any) {
+      logger.error('[Database] Error creating aggregation functions:', error);
+      throw error;
+    }
   }
 
   /**
@@ -277,7 +722,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.latest_date?.toISOString().split('T')[0] || null;
     } catch (error: any) {
-      console.error('[Database] Error getting latest date:', error.message);
+      logger.error('[Database] Error getting latest date:', error);
       return null;
     }
   }
@@ -295,7 +740,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.latest_date?.toISOString().split('T')[0] || null;
     } catch (error: any) {
-      console.error('[Database] Error getting latest date for token:', error.message);
+      logger.error('[Database] Error getting latest date for token:', error);
       return null;
     }
   }
@@ -343,10 +788,14 @@ export class DatabaseService {
             VALUES ${valuePlaceholders.join(', ')}
             ON CONFLICT (token, date) 
             DO UPDATE SET 
-              base_volume = EXCLUDED.base_volume,
-              target_volume = EXCLUDED.target_volume,
-              high = EXCLUDED.high,
-              low = EXCLUDED.low,
+              -- Only update if existing values are NULL or 0 (preserve existing data)
+              base_volume = COALESCE(NULLIF(daily_volumes.base_volume, 0), EXCLUDED.base_volume),
+              target_volume = COALESCE(NULLIF(daily_volumes.target_volume, 0), EXCLUDED.target_volume),
+              high = GREATEST(COALESCE(daily_volumes.high, 0), COALESCE(EXCLUDED.high, 0)),
+              low = LEAST(
+                CASE WHEN daily_volumes.low > 0 THEN daily_volumes.low ELSE EXCLUDED.low END,
+                CASE WHEN EXCLUDED.low > 0 THEN EXCLUDED.low ELSE daily_volumes.low END
+              ),
               updated_at = CURRENT_TIMESTAMP
           `;
 
@@ -355,12 +804,12 @@ export class DatabaseService {
           
           // Log progress for large batches
           if (records.length > BATCH_SIZE) {
-            console.log(`[Database] Daily volume batch progress: ${totalUpserted}/${records.length}`);
+            logger.info(`[Database] Daily volume batch progress: ${totalUpserted}/${records.length}`);
           }
         }
 
         await client.query('COMMIT');
-        console.log(`[Database] Upserted ${totalUpserted} daily volume records`);
+        logger.info(`[Database] Upserted ${totalUpserted} daily volume records`);
         return totalUpserted;
       } catch (error) {
         await client.query('ROLLBACK');
@@ -369,7 +818,7 @@ export class DatabaseService {
         client.release();
       }
     } catch (error: any) {
-      console.error('[Database] Error upserting daily volumes:', error.message);
+      logger.error('[Database] Error upserting daily volumes:', error);
       return 0;
     }
   }
@@ -392,7 +841,7 @@ export class DatabaseService {
       );
       return result.rows;
     } catch (error: any) {
-      console.error('[Database] Error getting daily volumes for token:', error.message);
+      logger.error('[Database] Error getting daily volumes for token:', error);
       return [];
     }
   }
@@ -427,7 +876,7 @@ export class DatabaseService {
       }
       return tokenMap;
     } catch (error: any) {
-      console.error('[Database] Error getting daily volumes for tokens:', error.message);
+      logger.error('[Database] Error getting daily volumes for tokens:', error);
       return new Map();
     }
   }
@@ -483,7 +932,7 @@ export class DatabaseService {
         daily_data: dailyDataMap.get(row.token.toLowerCase()) || [],
       }));
     } catch (error: any) {
-      console.error('[Database] Error getting aggregated volumes:', error.message);
+      logger.error('[Database] Error getting aggregated volumes:', error);
       return [];
     }
   }
@@ -533,7 +982,7 @@ export class DatabaseService {
       }
       return volumeMap;
     } catch (error: any) {
-      console.error('[Database] Error getting 24h volumes:', error.message);
+      logger.error('[Database] Error getting 24h volumes:', error);
       return new Map();
     }
   }
@@ -552,7 +1001,7 @@ export class DatabaseService {
         [key, value]
       );
     } catch (error: any) {
-      console.error('[Database] Error setting sync metadata:', error.message);
+      logger.error('[Database] Error setting sync metadata:', error);
     }
   }
 
@@ -569,7 +1018,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.value || null;
     } catch (error: any) {
-      console.error('[Database] Error getting sync metadata:', error.message);
+      logger.error('[Database] Error getting sync metadata:', error);
       return null;
     }
   }
@@ -591,7 +1040,7 @@ export class DatabaseService {
       const result = await this.pool.query('SELECT COUNT(*) as count FROM daily_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting daily record count:', error.message);
+      logger.error('[Database] Error getting daily record count:', error);
       return 0;
     }
   }
@@ -606,7 +1055,7 @@ export class DatabaseService {
       const result = await this.pool.query('SELECT COUNT(DISTINCT token) as count FROM daily_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting token count:', error.message);
+      logger.error('[Database] Error getting token count:', error);
       return 0;
     }
   }
@@ -627,7 +1076,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.latest_hour?.toISOString() || null;
     } catch (error: any) {
-      console.error('[Database] Error getting latest hour:', error.message);
+      logger.error('[Database] Error getting latest hour:', error);
       return null;
     }
   }
@@ -644,7 +1093,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.latest_hour?.toISOString() || null;
     } catch (error: any) {
-      console.error('[Database] Error getting latest complete hour:', error.message);
+      logger.error('[Database] Error getting latest complete hour:', error);
       return null;
     }
   }
@@ -675,31 +1124,50 @@ export class DatabaseService {
           const valuePlaceholders: string[] = [];
           
           batch.forEach((record, idx) => {
-            const offset = idx * 7; // 7 parameters per record
+            const offset = idx * 14; // 14 parameters per record (extended fields)
             valuePlaceholders.push(
-              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, ${markComplete}, CURRENT_TIMESTAMP)`
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, ${markComplete}, CURRENT_TIMESTAMP)`
             );
             values.push(
               record.token,
               record.hour,
               record.base_volume,
               record.target_volume,
+              record.buy_volume || '0',
+              record.sell_volume || '0',
               record.high,
               record.low,
-              record.trade_count || 0
+              record.average_price || '0',
+              record.trade_count || 0,
+              record.usdc_fees || '0',
+              record.token_fees || '0',
+              record.token_fees_usdc || '0',
+              record.sell_volume_usdc || '0'
             );
           });
 
           const batchSQL = `
-            INSERT INTO hourly_volumes (token, hour, base_volume, target_volume, high, low, trade_count, is_complete, updated_at)
+            INSERT INTO hourly_volumes (token, hour, base_volume, target_volume, buy_volume, sell_volume, high, low, average_price, trade_count, usdc_fees, token_fees, token_fees_usdc, sell_volume_usdc, is_complete, updated_at)
             VALUES ${valuePlaceholders.join(', ')}
             ON CONFLICT (token, hour) 
             DO UPDATE SET 
-              base_volume = EXCLUDED.base_volume,
-              target_volume = EXCLUDED.target_volume,
-              high = EXCLUDED.high,
-              low = EXCLUDED.low,
-              trade_count = EXCLUDED.trade_count,
+              -- Only update core fields if they're missing (NULL or 0) or if new data is better
+              base_volume = COALESCE(NULLIF(hourly_volumes.base_volume, 0), EXCLUDED.base_volume),
+              target_volume = COALESCE(NULLIF(hourly_volumes.target_volume, 0), EXCLUDED.target_volume),
+              high = GREATEST(COALESCE(hourly_volumes.high, 0), COALESCE(EXCLUDED.high, 0)),
+              low = LEAST(
+                CASE WHEN hourly_volumes.low > 0 THEN hourly_volumes.low ELSE EXCLUDED.low END,
+                CASE WHEN EXCLUDED.low > 0 THEN EXCLUDED.low ELSE hourly_volumes.low END
+              ),
+              trade_count = GREATEST(COALESCE(hourly_volumes.trade_count, 0), COALESCE(EXCLUDED.trade_count, 0)),
+              -- Only update extended fields if they're missing (NULL or 0)
+              buy_volume = COALESCE(NULLIF(hourly_volumes.buy_volume, 0), EXCLUDED.buy_volume),
+              sell_volume = COALESCE(NULLIF(hourly_volumes.sell_volume, 0), EXCLUDED.sell_volume),
+              average_price = COALESCE(NULLIF(hourly_volumes.average_price, 0), EXCLUDED.average_price),
+              usdc_fees = COALESCE(NULLIF(hourly_volumes.usdc_fees, 0), EXCLUDED.usdc_fees),
+              token_fees = COALESCE(NULLIF(hourly_volumes.token_fees, 0), EXCLUDED.token_fees),
+              token_fees_usdc = COALESCE(NULLIF(hourly_volumes.token_fees_usdc, 0), EXCLUDED.token_fees_usdc),
+              sell_volume_usdc = COALESCE(NULLIF(hourly_volumes.sell_volume_usdc, 0), EXCLUDED.sell_volume_usdc),
               is_complete = CASE WHEN EXCLUDED.is_complete THEN true ELSE hourly_volumes.is_complete END,
               updated_at = CURRENT_TIMESTAMP
           `;
@@ -709,12 +1177,12 @@ export class DatabaseService {
           
           // Log progress for large batches
           if (records.length > BATCH_SIZE) {
-            console.log(`[Database] Hourly volume batch progress: ${totalUpserted}/${records.length}`);
+            logger.info(`[Database] Hourly volume batch progress: ${totalUpserted}/${records.length}`);
           }
         }
 
         await client.query('COMMIT');
-        console.log(`[Database] Upserted ${totalUpserted} hourly volume records (complete: ${markComplete})`);
+        logger.info(`[Database] Upserted ${totalUpserted} hourly volume records (complete: ${markComplete})`);
         return totalUpserted;
       } catch (error) {
         await client.query('ROLLBACK');
@@ -723,7 +1191,7 @@ export class DatabaseService {
         client.release();
       }
     } catch (error: any) {
-      console.error('[Database] Error upserting hourly volumes:', error.message);
+      logger.error('[Database] Error upserting hourly volumes:', error);
       return 0;
     }
   }
@@ -740,9 +1208,9 @@ export class DatabaseService {
          WHERE hour < $1 AND is_complete = false`,
         [beforeHour]
       );
-      console.log(`[Database] Marked hours before ${beforeHour} as complete`);
+      logger.info(`[Database] Marked hours before ${beforeHour} as complete`);
     } catch (error: any) {
-      console.error('[Database] Error marking hours complete:', error.message);
+      logger.error('[Database] Error marking hours complete:', error);
     }
   }
 
@@ -793,7 +1261,7 @@ export class DatabaseService {
       }
       return metricsMap;
     } catch (error: any) {
-      console.error('[Database] Error getting rolling 24h metrics:', error.message);
+      logger.error('[Database] Error getting rolling 24h metrics:', error);
       return new Map();
     }
   }
@@ -838,7 +1306,7 @@ export class DatabaseService {
 
       return result.rows;
     } catch (error: any) {
-      console.error('[Database] Error getting hourly volumes:', error.message);
+      logger.error('[Database] Error getting hourly volumes:', error);
       return [];
     }
   }
@@ -853,7 +1321,7 @@ export class DatabaseService {
       const result = await this.pool.query('SELECT COUNT(*) as count FROM hourly_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting hourly record count:', error.message);
+      logger.error('[Database] Error getting hourly record count:', error);
       return 0;
     }
   }
@@ -868,7 +1336,7 @@ export class DatabaseService {
       const result = await this.pool.query('SELECT COUNT(DISTINCT token) as count FROM hourly_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting hourly token count:', error.message);
+      logger.error('[Database] Error getting hourly token count:', error);
       return 0;
     }
   }
@@ -888,11 +1356,11 @@ export class DatabaseService {
       );
       const deletedCount = result.rowCount || 0;
       if (deletedCount > 0) {
-        console.log(`[Database] Pruned ${deletedCount} hourly records older than ${keepHours} hours`);
+        logger.info(`[Database] Pruned ${deletedCount} hourly records older than ${keepHours} hours`);
       }
       return deletedCount;
     } catch (error: any) {
-      console.error('[Database] Error pruning old hourly data:', error.message);
+      logger.error('[Database] Error pruning old hourly data:', error);
       return 0;
     }
   }
@@ -923,31 +1391,50 @@ export class DatabaseService {
           const valuePlaceholders: string[] = [];
           
           batch.forEach((record, idx) => {
-            const offset = idx * 7;
+            const offset = idx * 14; // 14 parameters per record (extended fields)
             valuePlaceholders.push(
-              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, ${markComplete}, CURRENT_TIMESTAMP)`
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, ${markComplete}, CURRENT_TIMESTAMP)`
             );
             values.push(
               record.token,
               record.bucket,
               record.base_volume,
               record.target_volume,
+              record.buy_volume || '0',
+              record.sell_volume || '0',
               record.high,
               record.low,
-              record.trade_count || 0
+              record.average_price || '0',
+              record.trade_count || 0,
+              record.usdc_fees || '0',
+              record.token_fees || '0',
+              record.token_fees_usdc || '0',
+              record.sell_volume_usdc || '0'
             );
           });
 
           const batchSQL = `
-            INSERT INTO ten_minute_volumes (token, bucket, base_volume, target_volume, high, low, trade_count, is_complete, updated_at)
+            INSERT INTO ten_minute_volumes (token, bucket, base_volume, target_volume, buy_volume, sell_volume, high, low, average_price, trade_count, usdc_fees, token_fees, token_fees_usdc, sell_volume_usdc, is_complete, updated_at)
             VALUES ${valuePlaceholders.join(', ')}
             ON CONFLICT (token, bucket) 
             DO UPDATE SET 
-              base_volume = EXCLUDED.base_volume,
-              target_volume = EXCLUDED.target_volume,
-              high = EXCLUDED.high,
-              low = EXCLUDED.low,
-              trade_count = EXCLUDED.trade_count,
+              -- Only update core fields if they're missing (NULL or 0) or if new data is better
+              base_volume = COALESCE(NULLIF(ten_minute_volumes.base_volume, 0), EXCLUDED.base_volume),
+              target_volume = COALESCE(NULLIF(ten_minute_volumes.target_volume, 0), EXCLUDED.target_volume),
+              high = GREATEST(COALESCE(ten_minute_volumes.high, 0), COALESCE(EXCLUDED.high, 0)),
+              low = LEAST(
+                CASE WHEN ten_minute_volumes.low > 0 THEN ten_minute_volumes.low ELSE EXCLUDED.low END,
+                CASE WHEN EXCLUDED.low > 0 THEN EXCLUDED.low ELSE ten_minute_volumes.low END
+              ),
+              -- Only update extended fields if they're missing (NULL or 0)
+              buy_volume = COALESCE(NULLIF(ten_minute_volumes.buy_volume, 0), EXCLUDED.buy_volume),
+              sell_volume = COALESCE(NULLIF(ten_minute_volumes.sell_volume, 0), EXCLUDED.sell_volume),
+              average_price = COALESCE(NULLIF(ten_minute_volumes.average_price, 0), EXCLUDED.average_price),
+              trade_count = GREATEST(COALESCE(ten_minute_volumes.trade_count, 0), COALESCE(EXCLUDED.trade_count, 0)),
+              usdc_fees = COALESCE(NULLIF(ten_minute_volumes.usdc_fees, 0), EXCLUDED.usdc_fees),
+              token_fees = COALESCE(NULLIF(ten_minute_volumes.token_fees, 0), EXCLUDED.token_fees),
+              token_fees_usdc = COALESCE(NULLIF(ten_minute_volumes.token_fees_usdc, 0), EXCLUDED.token_fees_usdc),
+              sell_volume_usdc = COALESCE(NULLIF(ten_minute_volumes.sell_volume_usdc, 0), EXCLUDED.sell_volume_usdc),
               is_complete = CASE WHEN EXCLUDED.is_complete THEN true ELSE ten_minute_volumes.is_complete END,
               updated_at = CURRENT_TIMESTAMP
           `;
@@ -956,12 +1443,12 @@ export class DatabaseService {
           totalUpserted += batch.length;
           
           if (records.length > BATCH_SIZE) {
-            console.log(`[Database] 10-min volume batch progress: ${totalUpserted}/${records.length}`);
+            logger.info(`[Database] 10-min volume batch progress: ${totalUpserted}/${records.length}`);
           }
         }
 
         await client.query('COMMIT');
-        console.log(`[Database] Upserted ${totalUpserted} 10-minute volume records (complete: ${markComplete})`);
+        logger.info(`[Database] Upserted ${totalUpserted} 10-minute volume records (complete: ${markComplete})`);
         return totalUpserted;
       } catch (error) {
         await client.query('ROLLBACK');
@@ -970,7 +1457,7 @@ export class DatabaseService {
         client.release();
       }
     } catch (error: any) {
-      console.error('[Database] Error upserting 10-minute volumes:', error.message);
+      logger.error('[Database] Error upserting 10-minute volumes:', error);
       return 0;
     }
   }
@@ -988,58 +1475,385 @@ export class DatabaseService {
         [beforeBucket]
       );
     } catch (error: any) {
-      console.error('[Database] Error marking 10-min buckets complete:', error.message);
+      logger.error('[Database] Error marking 10-min buckets complete:', error);
+    }
+  }
+
+  /**
+   * Backfill missing extended fields in existing records
+   * This is safe to run on existing data - only fills in NULL or 0 values
+   */
+  async backfillMissingFields(): Promise<{
+    tenMinuteUpdated: number;
+    hourlyUpdated: number;
+    dailyUpdated: number;
+  }> {
+    if (!this.pool || !this.isConnected) {
+      return { tenMinuteUpdated: 0, hourlyUpdated: 0, dailyUpdated: 0 };
+    }
+
+    logger.info('[Database] Starting backfill of missing extended fields...');
+    const results = {
+      tenMinuteUpdated: 0,
+      hourlyUpdated: 0,
+      dailyUpdated: 0,
+    };
+
+    try {
+      // 1. Backfill hourly records from 10-minute data (for records missing extended fields)
+      logger.info('[Database] Backfilling hourly records from 10-minute data...');
+      const hourlyResult = await this.pool.query(`
+        WITH aggregated AS (
+          SELECT 
+            tmv.token,
+            date_trunc('hour', tmv.bucket) AS hour,
+            SUM(tmv.base_volume) AS base_volume,
+            SUM(tmv.target_volume) AS target_volume,
+            SUM(tmv.buy_volume) AS buy_volume,
+            SUM(tmv.sell_volume) AS sell_volume,
+            MAX(tmv.high) AS high,
+            MIN(CASE WHEN tmv.low > 0 THEN tmv.low END) AS low,
+            CASE 
+              WHEN SUM(tmv.base_volume) > 0 
+              THEN SUM(tmv.average_price * tmv.base_volume) / SUM(tmv.base_volume)
+              ELSE AVG(tmv.average_price)
+            END AS average_price,
+            SUM(tmv.trade_count) AS trade_count,
+            SUM(tmv.usdc_fees) AS usdc_fees,
+            SUM(tmv.token_fees) AS token_fees,
+            SUM(tmv.token_fees_usdc) AS token_fees_usdc,
+            SUM(tmv.sell_volume_usdc) AS sell_volume_usdc
+          FROM ten_minute_volumes tmv
+          WHERE tmv.buy_volume IS NOT NULL AND tmv.buy_volume > 0
+          GROUP BY tmv.token, date_trunc('hour', tmv.bucket)
+        )
+        UPDATE hourly_volumes hv
+        SET 
+          buy_volume = COALESCE(NULLIF(hv.buy_volume, 0), a.buy_volume),
+          sell_volume = COALESCE(NULLIF(hv.sell_volume, 0), a.sell_volume),
+          average_price = COALESCE(NULLIF(hv.average_price, 0), a.average_price),
+          usdc_fees = COALESCE(NULLIF(hv.usdc_fees, 0), a.usdc_fees),
+          token_fees = COALESCE(NULLIF(hv.token_fees, 0), a.token_fees),
+          token_fees_usdc = COALESCE(NULLIF(hv.token_fees_usdc, 0), a.token_fees_usdc),
+          sell_volume_usdc = COALESCE(NULLIF(hv.sell_volume_usdc, 0), a.sell_volume_usdc),
+          updated_at = CURRENT_TIMESTAMP
+        FROM aggregated a
+        WHERE hv.token = a.token 
+          AND hv.hour = a.hour
+          AND (
+            hv.buy_volume IS NULL OR hv.buy_volume = 0 OR
+            hv.sell_volume IS NULL OR hv.sell_volume = 0 OR
+            hv.average_price IS NULL OR hv.average_price = 0
+          )
+        RETURNING hv.id
+      `);
+      results.hourlyUpdated = hourlyResult.rowCount || 0;
+      logger.info(`[Database] Updated ${results.hourlyUpdated} hourly records with missing fields`);
+
+      // 2. Backfill daily records from hourly data (for records missing extended fields)
+      logger.info('[Database] Backfilling daily records from hourly data...');
+      const dailyResult = await this.pool.query(`
+        WITH aggregated AS (
+          SELECT 
+            hv.token,
+            date_trunc('day', hv.hour)::DATE AS date,
+            SUM(hv.base_volume) AS base_volume,
+            SUM(hv.target_volume) AS target_volume,
+            SUM(hv.buy_volume) AS buy_volume,
+            SUM(hv.sell_volume) AS sell_volume,
+            MAX(hv.high) AS high,
+            MIN(CASE WHEN hv.low > 0 THEN hv.low END) AS low,
+            CASE 
+              WHEN SUM(hv.base_volume) > 0 
+              THEN SUM(hv.average_price * hv.base_volume) / SUM(hv.base_volume)
+              ELSE AVG(hv.average_price)
+            END AS average_price,
+            SUM(hv.trade_count) AS trade_count,
+            SUM(hv.usdc_fees) AS usdc_fees,
+            SUM(hv.token_fees) AS token_fees,
+            SUM(hv.token_fees_usdc) AS token_fees_usdc,
+            SUM(hv.sell_volume_usdc) AS sell_volume_usdc
+          FROM hourly_volumes hv
+          WHERE hv.buy_volume IS NOT NULL AND hv.buy_volume > 0
+          GROUP BY hv.token, date_trunc('day', hv.hour)::DATE
+        ),
+        cumulative AS (
+          SELECT 
+            a.*,
+            SUM(a.usdc_fees) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_usdc_fees,
+            SUM(a.token_fees_usdc) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_token_in_usdc_fees,
+            SUM(a.target_volume) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_target_volume,
+            SUM(a.base_volume) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_token_volume
+          FROM aggregated a
+        )
+        UPDATE daily_volumes dv
+        SET 
+          buy_volume = COALESCE(NULLIF(dv.buy_volume, 0), c.buy_volume),
+          sell_volume = COALESCE(NULLIF(dv.sell_volume, 0), c.sell_volume),
+          average_price = COALESCE(NULLIF(dv.average_price, 0), c.average_price),
+          trade_count = COALESCE(NULLIF(dv.trade_count, 0), c.trade_count),
+          usdc_fees = COALESCE(NULLIF(dv.usdc_fees, 0), c.usdc_fees),
+          token_fees = COALESCE(NULLIF(dv.token_fees, 0), c.token_fees),
+          token_fees_usdc = COALESCE(NULLIF(dv.token_fees_usdc, 0), c.token_fees_usdc),
+          sell_volume_usdc = COALESCE(NULLIF(dv.sell_volume_usdc, 0), c.sell_volume_usdc),
+          cumulative_usdc_fees = COALESCE(NULLIF(dv.cumulative_usdc_fees, 0), c.cumulative_usdc_fees),
+          cumulative_token_in_usdc_fees = COALESCE(NULLIF(dv.cumulative_token_in_usdc_fees, 0), c.cumulative_token_in_usdc_fees),
+          cumulative_target_volume = COALESCE(NULLIF(dv.cumulative_target_volume, 0), c.cumulative_target_volume),
+          cumulative_token_volume = COALESCE(NULLIF(dv.cumulative_token_volume, 0), c.cumulative_token_volume),
+          updated_at = CURRENT_TIMESTAMP
+        FROM cumulative c
+        WHERE dv.token = c.token 
+          AND dv.date = c.date
+          AND (
+            dv.buy_volume IS NULL OR dv.buy_volume = 0 OR
+            dv.sell_volume IS NULL OR dv.sell_volume = 0 OR
+            dv.average_price IS NULL OR dv.average_price = 0
+          )
+        RETURNING dv.id
+      `);
+      results.dailyUpdated = dailyResult.rowCount || 0;
+      logger.info(`[Database] Updated ${results.dailyUpdated} daily records with missing fields`);
+
+      logger.info('[Database] Backfill completed:', { results });
+      return results;
+    } catch (error: any) {
+      logger.error('[Database] Error during backfill:', error);
+      return results;
     }
   }
 
   /**
    * Get rolling 24h metrics from 10-minute data (most accurate)
-   * This sums the last 144 ten-minute buckets for each token
+   * This uses the calculate_rolling_24h function
    */
   async getRolling24hFromTenMinute(tokens?: string[]): Promise<Map<string, Rolling24hMetrics>> {
     if (!this.pool || !this.isConnected) return new Map();
 
     try {
-      const cutoffTime = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-      let whereClause = 'WHERE bucket >= $1';
-      let params: any[] = [cutoffTime];
-
-      if (tokens && tokens.length > 0) {
-        const placeholders = tokens.map((_, i) => `LOWER($${i + 2})`).join(', ');
-        whereClause += ` AND LOWER(token) IN (${placeholders})`;
-        params = [cutoffTime, ...tokens.map(t => t.toLowerCase())];
-      }
-
-      const result = await this.pool.query(
-        `SELECT 
-          token,
-          SUM(base_volume)::text as base_volume_24h,
-          SUM(target_volume)::text as target_volume_24h,
-          MAX(high)::text as high_24h,
-          MIN(CASE WHEN low > 0 THEN low END)::text as low_24h,
-          SUM(trade_count)::int as trade_count_24h
-         FROM ten_minute_volumes
-         ${whereClause}
-         GROUP BY token`,
-        params
-      );
-
       const metricsMap = new Map<string, Rolling24hMetrics>();
-      for (const row of result.rows) {
-        metricsMap.set(row.token.toLowerCase(), {
-          token: row.token,
-          base_volume_24h: row.base_volume_24h || '0',
-          target_volume_24h: row.target_volume_24h || '0',
-          high_24h: row.high_24h || '0',
-          low_24h: row.low_24h || '0',
-          trade_count_24h: row.trade_count_24h || 0,
-        });
+      
+      if (tokens && tokens.length > 0) {
+        // Get metrics for specific tokens
+        for (const token of tokens) {
+          const result = await this.pool.query(
+            `SELECT * FROM calculate_rolling_24h($1)`,
+            [token]
+          );
+          
+          for (const row of result.rows) {
+            metricsMap.set(row.token.toLowerCase(), {
+              token: row.token,
+              base_volume_24h: row.base_volume_24h?.toString() || '0',
+              target_volume_24h: row.target_volume_24h?.toString() || '0',
+              high_24h: row.high_24h?.toString() || '0',
+              low_24h: row.low_24h?.toString() || '0',
+              trade_count_24h: row.trade_count_24h || 0,
+            });
+          }
+        }
+      } else {
+        // Get metrics for all tokens
+        const result = await this.pool.query(
+          `SELECT * FROM calculate_rolling_24h(NULL)`
+        );
+        
+        for (const row of result.rows) {
+          metricsMap.set(row.token.toLowerCase(), {
+            token: row.token,
+            base_volume_24h: row.base_volume_24h?.toString() || '0',
+            target_volume_24h: row.target_volume_24h?.toString() || '0',
+            high_24h: row.high_24h?.toString() || '0',
+            low_24h: row.low_24h?.toString() || '0',
+            trade_count_24h: row.trade_count_24h || 0,
+          });
+        }
       }
+      
       return metricsMap;
     } catch (error: any) {
-      console.error('[Database] Error getting rolling 24h from 10-min data:', error.message);
+      logger.error('[Database] Error getting rolling 24h from 10-min data:', error);
       return new Map();
+    }
+  }
+
+  /**
+   * Aggregate 10-minute buckets into hourly records and upsert to hourly_volumes
+   * @param token Optional token to aggregate (if null, aggregates all tokens)
+   * @param hour Optional hour to aggregate (if null, aggregates all incomplete hours)
+   * @returns Number of hourly records created/updated
+   */
+  async aggregate10MinToHourly(token?: string, hour?: string): Promise<number> {
+    if (!this.pool || !this.isConnected) return 0;
+
+    try {
+      const result = await this.pool.query(
+        `SELECT * FROM aggregate_10min_to_hourly($1, $2)`,
+        [token || null, hour || null]
+      );
+
+      if (result.rows.length === 0) {
+        return 0;
+      }
+
+      // Upsert aggregated data into hourly_volumes
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        for (const row of result.rows) {
+          await client.query(
+            `INSERT INTO hourly_volumes (
+              token, hour, base_volume, target_volume, buy_volume, sell_volume,
+              high, low, average_price, trade_count, usdc_fees, token_fees,
+              token_fees_usdc, sell_volume_usdc, is_complete, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, true, CURRENT_TIMESTAMP)
+            ON CONFLICT (token, hour) DO UPDATE SET
+              -- Only update core fields if missing or if new data is better
+              base_volume = COALESCE(NULLIF(hourly_volumes.base_volume, 0), EXCLUDED.base_volume),
+              target_volume = COALESCE(NULLIF(hourly_volumes.target_volume, 0), EXCLUDED.target_volume),
+              high = GREATEST(COALESCE(hourly_volumes.high, 0), COALESCE(EXCLUDED.high, 0)),
+              low = LEAST(
+                CASE WHEN hourly_volumes.low > 0 THEN hourly_volumes.low ELSE EXCLUDED.low END,
+                CASE WHEN EXCLUDED.low > 0 THEN EXCLUDED.low ELSE hourly_volumes.low END
+              ),
+              trade_count = GREATEST(COALESCE(hourly_volumes.trade_count, 0), COALESCE(EXCLUDED.trade_count, 0)),
+              -- Only update extended fields if missing
+              buy_volume = COALESCE(NULLIF(hourly_volumes.buy_volume, 0), EXCLUDED.buy_volume),
+              sell_volume = COALESCE(NULLIF(hourly_volumes.sell_volume, 0), EXCLUDED.sell_volume),
+              average_price = COALESCE(NULLIF(hourly_volumes.average_price, 0), EXCLUDED.average_price),
+              usdc_fees = COALESCE(NULLIF(hourly_volumes.usdc_fees, 0), EXCLUDED.usdc_fees),
+              token_fees = COALESCE(NULLIF(hourly_volumes.token_fees, 0), EXCLUDED.token_fees),
+              token_fees_usdc = COALESCE(NULLIF(hourly_volumes.token_fees_usdc, 0), EXCLUDED.token_fees_usdc),
+              sell_volume_usdc = COALESCE(NULLIF(hourly_volumes.sell_volume_usdc, 0), EXCLUDED.sell_volume_usdc),
+              is_complete = true,
+              updated_at = CURRENT_TIMESTAMP`,
+            [
+              row.token,
+              row.hour,
+              row.base_volume,
+              row.target_volume,
+              row.buy_volume,
+              row.sell_volume,
+              row.high,
+              row.low,
+              row.average_price,
+              row.trade_count,
+              row.usdc_fees,
+              row.token_fees,
+              row.token_fees_usdc,
+              row.sell_volume_usdc,
+            ]
+          );
+        }
+
+        await client.query('COMMIT');
+        logger.info(`[Database] Aggregated ${result.rows.length} hourly records from 10-minute data`);
+        return result.rows.length;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      logger.error('[Database] Error aggregating 10-min to hourly:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Aggregate hourly records into daily records with cumulative values and upsert to daily_volumes
+   * @param token Optional token to aggregate (if null, aggregates all tokens)
+   * @param date Optional date to aggregate (if null, aggregates all incomplete days)
+   * @returns Number of daily records created/updated
+   */
+  async aggregateHourlyToDaily(token?: string, date?: string): Promise<number> {
+    if (!this.pool || !this.isConnected) return 0;
+
+    try {
+      const result = await this.pool.query(
+        `SELECT * FROM aggregate_hourly_to_daily($1, $2)`,
+        [token || null, date || null]
+      );
+
+      if (result.rows.length === 0) {
+        return 0;
+      }
+
+      // Upsert aggregated data into daily_volumes
+      const client = await this.pool.connect();
+      try {
+        await client.query('BEGIN');
+
+        for (const row of result.rows) {
+          await client.query(
+            `INSERT INTO daily_volumes (
+              token, date, base_volume, target_volume, buy_volume, sell_volume,
+              high, low, average_price, trade_count, usdc_fees, token_fees,
+              token_fees_usdc, sell_volume_usdc, cumulative_usdc_fees,
+              cumulative_token_in_usdc_fees, cumulative_target_volume,
+              cumulative_token_volume, is_complete, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, true, CURRENT_TIMESTAMP)
+            ON CONFLICT (token, date) DO UPDATE SET
+              -- Only update core fields if missing or if new data is better
+              base_volume = COALESCE(NULLIF(daily_volumes.base_volume, 0), EXCLUDED.base_volume),
+              target_volume = COALESCE(NULLIF(daily_volumes.target_volume, 0), EXCLUDED.target_volume),
+              high = GREATEST(COALESCE(daily_volumes.high, 0), COALESCE(EXCLUDED.high, 0)),
+              low = LEAST(
+                CASE WHEN daily_volumes.low > 0 THEN daily_volumes.low ELSE EXCLUDED.low END,
+                CASE WHEN EXCLUDED.low > 0 THEN EXCLUDED.low ELSE daily_volumes.low END
+              ),
+              trade_count = GREATEST(COALESCE(daily_volumes.trade_count, 0), COALESCE(EXCLUDED.trade_count, 0)),
+              -- Only update extended fields if missing
+              buy_volume = COALESCE(NULLIF(daily_volumes.buy_volume, 0), EXCLUDED.buy_volume),
+              sell_volume = COALESCE(NULLIF(daily_volumes.sell_volume, 0), EXCLUDED.sell_volume),
+              average_price = COALESCE(NULLIF(daily_volumes.average_price, 0), EXCLUDED.average_price),
+              usdc_fees = COALESCE(NULLIF(daily_volumes.usdc_fees, 0), EXCLUDED.usdc_fees),
+              token_fees = COALESCE(NULLIF(daily_volumes.token_fees, 0), EXCLUDED.token_fees),
+              token_fees_usdc = COALESCE(NULLIF(daily_volumes.token_fees_usdc, 0), EXCLUDED.token_fees_usdc),
+              sell_volume_usdc = COALESCE(NULLIF(daily_volumes.sell_volume_usdc, 0), EXCLUDED.sell_volume_usdc),
+              -- Cumulative values should be recalculated, but preserve if already set
+              cumulative_usdc_fees = COALESCE(NULLIF(daily_volumes.cumulative_usdc_fees, 0), EXCLUDED.cumulative_usdc_fees),
+              cumulative_token_in_usdc_fees = COALESCE(NULLIF(daily_volumes.cumulative_token_in_usdc_fees, 0), EXCLUDED.cumulative_token_in_usdc_fees),
+              cumulative_target_volume = COALESCE(NULLIF(daily_volumes.cumulative_target_volume, 0), EXCLUDED.cumulative_target_volume),
+              cumulative_token_volume = COALESCE(NULLIF(daily_volumes.cumulative_token_volume, 0), EXCLUDED.cumulative_token_volume),
+              is_complete = true,
+              updated_at = CURRENT_TIMESTAMP`,
+            [
+              row.token,
+              row.date,
+              row.base_volume,
+              row.target_volume,
+              row.buy_volume,
+              row.sell_volume,
+              row.high,
+              row.low,
+              row.average_price,
+              row.trade_count,
+              row.usdc_fees,
+              row.token_fees,
+              row.token_fees_usdc,
+              row.sell_volume_usdc,
+              row.cumulative_usdc_fees,
+              row.cumulative_token_in_usdc_fees,
+              row.cumulative_target_volume,
+              row.cumulative_token_volume,
+            ]
+          );
+        }
+
+        await client.query('COMMIT');
+        logger.info(`[Database] Aggregated ${result.rows.length} daily records from hourly data`);
+        return result.rows.length;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      logger.error('[Database] Error aggregating hourly to daily:', error);
+      return 0;
     }
   }
 
@@ -1055,7 +1869,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.latest_bucket?.toISOString() || null;
     } catch (error: any) {
-      console.error('[Database] Error getting latest 10-min bucket:', error.message);
+      logger.error('[Database] Error getting latest 10-min bucket:', error);
       return null;
     }
   }
@@ -1070,7 +1884,7 @@ export class DatabaseService {
       const result = await this.pool.query('SELECT COUNT(*) as count FROM ten_minute_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting 10-min record count:', error.message);
+      logger.error('[Database] Error getting 10-min record count:', error);
       return 0;
     }
   }
@@ -1089,11 +1903,11 @@ export class DatabaseService {
       );
       const deletedCount = result.rowCount || 0;
       if (deletedCount > 0) {
-        console.log(`[Database] Pruned ${deletedCount} 10-minute records older than ${keepHours} hours`);
+        logger.info(`[Database] Pruned ${deletedCount} 10-minute records older than ${keepHours} hours`);
       }
       return deletedCount;
     } catch (error: any) {
-      console.error('[Database] Error pruning old 10-min data:', error.message);
+      logger.error('[Database] Error pruning old 10-min data:', error);
       return 0;
     }
   }
@@ -1114,7 +1928,7 @@ export class DatabaseService {
       );
       return result.rows[0]?.latest_date?.toISOString().split('T')[0] || null;
     } catch (error: any) {
-      console.error('[Database] Error getting latest buy/sell date:', error.message);
+      logger.error('[Database] Error getting latest buy/sell date:', error);
       return null;
     }
   }
@@ -1182,12 +1996,12 @@ export class DatabaseService {
           totalUpserted += batch.length;
           
           if (records.length > BATCH_SIZE) {
-            console.log(`[Database] Buy/sell volume batch progress: ${totalUpserted}/${records.length}`);
+            logger.info(`[Database] Buy/sell volume batch progress: ${totalUpserted}/${records.length}`);
           }
         }
 
         await client.query('COMMIT');
-        console.log(`[Database] Upserted ${totalUpserted} daily buy/sell volume records`);
+        logger.info(`[Database] Upserted ${totalUpserted} daily buy/sell volume records`);
         return totalUpserted;
       } catch (error) {
         await client.query('ROLLBACK');
@@ -1196,7 +2010,7 @@ export class DatabaseService {
         client.release();
       }
     } catch (error: any) {
-      console.error('[Database] Error upserting daily buy/sell volumes:', error.message);
+      logger.error('[Database] Error upserting daily buy/sell volumes:', error);
       return 0;
     }
   }
@@ -1255,7 +2069,7 @@ export class DatabaseService {
 
       return result.rows;
     } catch (error: any) {
-      console.error('[Database] Error getting cumulative volumes:', error.message);
+      logger.error('[Database] Error getting cumulative volumes:', error);
       return [];
     }
   }
@@ -1268,6 +2082,7 @@ export class DatabaseService {
    */
   async getDailyBuySellVolumes(options?: {
     token?: string;
+    tokens?: string[];
     startDate?: string;
     endDate?: string;
   }): Promise<{
@@ -1288,7 +2103,13 @@ export class DatabaseService {
       const params: any[] = [];
       let paramIndex = 1;
 
-      if (options?.token) {
+      // Support both single token and array of tokens
+      if (options?.tokens && options.tokens.length > 0) {
+        const placeholders = options.tokens.map((_, i) => `LOWER($${paramIndex + i})`).join(', ');
+        conditions.push(`LOWER(token) IN (${placeholders})`);
+        params.push(...options.tokens);
+        paramIndex += options.tokens.length;
+      } else if (options?.token) {
         conditions.push(`LOWER(token) = LOWER($${paramIndex})`);
         params.push(options.token);
         paramIndex++;
@@ -1327,7 +2148,7 @@ export class DatabaseService {
 
       return result.rows;
     } catch (error: any) {
-      console.error('[Database] Error getting daily buy/sell volumes:', error.message);
+      logger.error('[Database] Error getting daily buy/sell volumes:', error);
       return [];
     }
   }
@@ -1387,7 +2208,7 @@ export class DatabaseService {
       }
       return aggregates;
     } catch (error: any) {
-      console.error('[Database] Error getting buy/sell aggregates:', error.message);
+      logger.error('[Database] Error getting buy/sell aggregates:', error);
       return new Map();
     }
   }
@@ -1412,7 +2233,7 @@ export class DatabaseService {
       }
       return map;
     } catch (error: any) {
-      console.error('[Database] Error getting first trade dates:', error.message);
+      logger.error('[Database] Error getting first trade dates:', error);
       return new Map();
     }
   }
@@ -1427,7 +2248,7 @@ export class DatabaseService {
       const result = await this.pool.query('SELECT COUNT(*) as count FROM daily_buy_sell_volumes');
       return parseInt(result.rows[0]?.count || '0');
     } catch (error: any) {
-      console.error('[Database] Error getting buy/sell record count:', error.message);
+      logger.error('[Database] Error getting buy/sell record count:', error);
       return 0;
     }
   }
@@ -1444,9 +2265,378 @@ export class DatabaseService {
          WHERE date < $1 AND is_complete = false`,
         [beforeDate]
       );
-      console.log(`[Database] Marked buy/sell days before ${beforeDate} as complete`);
+      logger.info(`[Database] Marked buy/sell days before ${beforeDate} as complete`);
     } catch (error: any) {
-      console.error('[Database] Error marking buy/sell days complete:', error.message);
+      logger.error('[Database] Error marking buy/sell days complete:', error);
+    }
+  }
+
+  // ============================================
+  // DAILY FEES VOLUME METHODS
+  // ============================================
+
+  /**
+   * Get the latest date we have fees data for
+   */
+  async getLatestFeesDate(): Promise<string | null> {
+    if (!this.pool || !this.isConnected) return null;
+
+    try {
+      const result = await this.pool.query(
+        'SELECT MAX(trading_date) as latest_date FROM daily_fees_volumes WHERE is_complete = true'
+      );
+      return result.rows[0]?.latest_date?.toISOString().split('T')[0] || null;
+    } catch (error: any) {
+      logger.error('[Database] Error getting latest fees date:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Upsert daily fees volume records using batched inserts
+   * @param records Array of daily fees volume records
+   * @param markComplete If true, marks these days as complete (for historical data)
+   */
+  async upsertDailyFeesVolumes(records: DailyFeesVolumeRecord[], markComplete: boolean = false): Promise<number> {
+    if (!this.pool || !this.isConnected || records.length === 0) {
+      return 0;
+    }
+
+    const BATCH_SIZE = 500;
+    let totalUpserted = 0;
+
+    try {
+      const client = await this.pool.connect();
+
+      try {
+        await client.query('BEGIN');
+
+        for (let i = 0; i < records.length; i += BATCH_SIZE) {
+          const batch = records.slice(i, i + BATCH_SIZE);
+          
+          const values: any[] = [];
+          const valuePlaceholders: string[] = [];
+          
+          batch.forEach((record, idx) => {
+            const offset = idx * 17; // 17 parameters per record
+            valuePlaceholders.push(
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, $${offset + 16}, $${offset + 17}, ${markComplete}, CURRENT_TIMESTAMP)`
+            );
+            values.push(
+              record.token,
+              record.trading_date,
+              record.base_volume,
+              record.target_volume,
+              record.usdc_fees,
+              record.token_fees_usdc,
+              record.token_fees,
+              record.buy_volume,
+              record.sell_volume,
+              record.sell_volume_usdc,
+              record.cumulative_usdc_fees,
+              record.cumulative_token_in_usdc_fees,
+              record.cumulative_target_volume,
+              record.cumulative_token_volume,
+              record.high,
+              record.average_price,
+              record.low
+            );
+          });
+
+          const batchSQL = `
+            INSERT INTO daily_fees_volumes (token, trading_date, base_volume, target_volume, usdc_fees, token_fees_usdc, token_fees, buy_volume, sell_volume, sell_volume_usdc, cumulative_usdc_fees, cumulative_token_in_usdc_fees, cumulative_target_volume, cumulative_token_volume, high, average_price, low, is_complete, updated_at)
+            VALUES ${valuePlaceholders.join(', ')}
+            ON CONFLICT (token, trading_date) 
+            DO UPDATE SET 
+              base_volume = EXCLUDED.base_volume,
+              target_volume = EXCLUDED.target_volume,
+              usdc_fees = EXCLUDED.usdc_fees,
+              token_fees_usdc = EXCLUDED.token_fees_usdc,
+              token_fees = EXCLUDED.token_fees,
+              buy_volume = EXCLUDED.buy_volume,
+              sell_volume = EXCLUDED.sell_volume,
+              sell_volume_usdc = EXCLUDED.sell_volume_usdc,
+              cumulative_usdc_fees = EXCLUDED.cumulative_usdc_fees,
+              cumulative_token_in_usdc_fees = EXCLUDED.cumulative_token_in_usdc_fees,
+              cumulative_target_volume = EXCLUDED.cumulative_target_volume,
+              cumulative_token_volume = EXCLUDED.cumulative_token_volume,
+              high = EXCLUDED.high,
+              average_price = EXCLUDED.average_price,
+              low = EXCLUDED.low,
+              is_complete = CASE WHEN EXCLUDED.is_complete THEN true ELSE daily_fees_volumes.is_complete END,
+              updated_at = CURRENT_TIMESTAMP
+          `;
+
+          await client.query(batchSQL, values);
+          totalUpserted += batch.length;
+          
+          if (records.length > BATCH_SIZE) {
+            logger.info(`[Database] Fees volume batch progress: ${totalUpserted}/${records.length}`);
+          }
+        }
+
+        await client.query('COMMIT');
+        logger.info(`[Database] Upserted ${totalUpserted} daily fees volume records`);
+        return totalUpserted;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      logger.error('[Database] Error upserting daily fees volumes:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Get daily fees volumes with date range filtering
+   * @param options.token Filter by specific token
+   * @param options.startDate Start date (inclusive) in YYYY-MM-DD format
+   * @param options.endDate End date (inclusive) in YYYY-MM-DD format
+   */
+  async getDailyFeesVolumes(options?: {
+    token?: string;
+    startDate?: string;
+    endDate?: string;
+  }): Promise<DailyFeesVolumeRecord[]> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let paramIndex = 1;
+
+      if (options?.token) {
+        conditions.push(`LOWER(token) = LOWER($${paramIndex})`);
+        params.push(options.token);
+        paramIndex++;
+      }
+
+      if (options?.startDate) {
+        conditions.push(`trading_date >= $${paramIndex}`);
+        params.push(options.startDate);
+        paramIndex++;
+      }
+
+      if (options?.endDate) {
+        conditions.push(`trading_date <= $${paramIndex}`);
+        params.push(options.endDate);
+        paramIndex++;
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const result = await this.pool.query(
+        `SELECT 
+          token,
+          trading_date::text,
+          base_volume::text,
+          target_volume::text,
+          usdc_fees::text,
+          token_fees_usdc::text,
+          token_fees::text,
+          buy_volume::text,
+          sell_volume::text,
+          sell_volume_usdc::text,
+          cumulative_usdc_fees::text,
+          cumulative_token_in_usdc_fees::text,
+          cumulative_target_volume::text,
+          cumulative_token_volume::text,
+          high::text,
+          average_price::text,
+          low::text
+         FROM daily_fees_volumes
+         ${whereClause}
+         ORDER BY token, trading_date ASC`,
+        params
+      );
+
+      return result.rows;
+    } catch (error: any) {
+      logger.error('[Database] Error getting daily fees volumes:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Mark days as complete (called when day boundary passes)
+   */
+  async markFeesDaysComplete(beforeDate: string): Promise<void> {
+    if (!this.pool || !this.isConnected) return;
+
+    try {
+      await this.pool.query(
+        `UPDATE daily_fees_volumes SET is_complete = true, updated_at = CURRENT_TIMESTAMP
+         WHERE trading_date < $1 AND is_complete = false`,
+        [beforeDate]
+      );
+      logger.info(`[Database] Marked fees days before ${beforeDate} as complete`);
+    } catch (error: any) {
+      logger.error('[Database] Error marking fees days complete:', error);
+    }
+  }
+
+  /**
+   * Get fees volume record count
+   */
+  async getFeesRecordCount(): Promise<number> {
+    if (!this.pool || !this.isConnected) return 0;
+
+    try {
+      const result = await this.pool.query('SELECT COUNT(*) as count FROM daily_fees_volumes');
+      return parseInt(result.rows[0]?.count || '0');
+    } catch (error: any) {
+      logger.error('[Database] Error getting fees record count:', error);
+      return 0;
+    }
+  }
+
+  // ============================================
+  // METEORA VOLUMES METHODS
+  // ============================================
+
+  /**
+   * Get the latest complete date from daily_meteora_volumes table
+   */
+  async getLatestMeteoraDate(): Promise<string | null> {
+    if (!this.pool || !this.isConnected) return null;
+
+    try {
+      const result = await this.pool.query(
+        'SELECT MAX(date) as latest_date FROM daily_meteora_volumes WHERE is_complete = true'
+      );
+      return result.rows[0]?.latest_date?.toISOString().split('T')[0] || null;
+    } catch (error: any) {
+      logger.error('[Database] Error getting latest Meteora date:', error);
+      return null;
+    }
+  }
+
+  /**
+   * Upsert daily Meteora volume records using batched inserts
+   * @param records Array of daily Meteora volume records
+   * @param markComplete Whether to mark records as complete
+   * @returns Number of records upserted
+   */
+  async upsertDailyMeteoraVolumes(records: DailyMeteoraVolumeRecord[], markComplete: boolean = false): Promise<number> {
+    if (!this.pool || !this.isConnected || records.length === 0) {
+      return 0;
+    }
+
+    const BATCH_SIZE = 500;
+    let totalUpserted = 0;
+
+    try {
+      const client = await this.pool.connect();
+
+      try {
+        await client.query('BEGIN');
+
+        for (let i = 0; i < records.length; i += BATCH_SIZE) {
+          const batch = records.slice(i, i + BATCH_SIZE);
+          
+          const values: any[] = [];
+          const valuePlaceholders: string[] = [];
+          
+          batch.forEach((record, idx) => {
+            const offset = idx * 13; // 13 parameters per record
+            valuePlaceholders.push(
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, ${markComplete}, CURRENT_TIMESTAMP)`
+            );
+            values.push(
+              record.token,
+              record.date,
+              record.base_volume,
+              record.target_volume,
+              record.trade_count,
+              record.buy_volume,
+              record.sell_volume,
+              record.usdc_fees,
+              record.token_fees,
+              record.token_fees_usdc,
+              record.token_per_usdc,
+              record.average_price,
+              record.ownership_share,
+              record.earned_fee_usdc
+            );
+          });
+
+          const batchSQL = `
+            INSERT INTO daily_meteora_volumes (token, date, base_volume, target_volume, trade_count, buy_volume, sell_volume, usdc_fees, token_fees, token_fees_usdc, token_per_usdc, average_price, ownership_share, earned_fee_usdc, is_complete, updated_at)
+            VALUES ${valuePlaceholders.join(', ')}
+            ON CONFLICT (token, date) 
+            DO UPDATE SET 
+              base_volume = EXCLUDED.base_volume,
+              target_volume = EXCLUDED.target_volume,
+              trade_count = EXCLUDED.trade_count,
+              buy_volume = EXCLUDED.buy_volume,
+              sell_volume = EXCLUDED.sell_volume,
+              usdc_fees = EXCLUDED.usdc_fees,
+              token_fees = EXCLUDED.token_fees,
+              token_fees_usdc = EXCLUDED.token_fees_usdc,
+              token_per_usdc = EXCLUDED.token_per_usdc,
+              average_price = EXCLUDED.average_price,
+              ownership_share = EXCLUDED.ownership_share,
+              earned_fee_usdc = EXCLUDED.earned_fee_usdc,
+              is_complete = CASE WHEN EXCLUDED.is_complete THEN true ELSE daily_meteora_volumes.is_complete END,
+              updated_at = CURRENT_TIMESTAMP
+          `;
+
+          await client.query(batchSQL, values);
+          totalUpserted += batch.length;
+          
+          if (records.length > BATCH_SIZE) {
+            logger.info(`[Database] Meteora volume batch progress: ${totalUpserted}/${records.length}`);
+          }
+        }
+
+        await client.query('COMMIT');
+        logger.info(`[Database] Upserted ${totalUpserted} daily Meteora volume records`);
+        return totalUpserted;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    } catch (error: any) {
+      logger.error('[Database] Error upserting daily Meteora volumes:', error);
+      return 0;
+    }
+  }
+
+  /**
+   * Mark Meteora volume days as complete before a given date
+   */
+  async markMeteoraDaysComplete(beforeDate: string): Promise<void> {
+    if (!this.pool || !this.isConnected) return;
+
+    try {
+      await this.pool.query(
+        `UPDATE daily_meteora_volumes SET is_complete = true, updated_at = CURRENT_TIMESTAMP
+         WHERE date < $1 AND is_complete = false`,
+        [beforeDate]
+      );
+      logger.info(`[Database] Marked Meteora days before ${beforeDate} as complete`);
+    } catch (error: any) {
+      logger.error('[Database] Error marking Meteora days complete:', error);
+    }
+  }
+
+  /**
+   * Get count of Meteora volume records
+   */
+  async getMeteoraRecordCount(): Promise<number> {
+    if (!this.pool || !this.isConnected) return 0;
+
+    try {
+      const result = await this.pool.query('SELECT COUNT(*) as count FROM daily_meteora_volumes');
+      return parseInt(result.rows[0]?.count || '0');
+    } catch (error: any) {
+      logger.error('[Database] Error getting Meteora record count:', error);
+      return 0;
     }
   }
 
@@ -1469,7 +2659,7 @@ export class DatabaseService {
       );
     } catch (error: any) {
       // Silently ignore metrics insert errors to not affect main operations
-      console.error('[Database] Error inserting metric:', error.message);
+      logger.error('[Database] Error inserting metric:', error);
     }
   }
 
@@ -1501,7 +2691,7 @@ export class DatabaseService {
         client.release();
       }
     } catch (error: any) {
-      console.error('[Database] Error inserting metrics batch:', error.message);
+      logger.error('[Database] Error inserting metrics batch:', error);
     }
   }
 
@@ -1533,7 +2723,7 @@ export class DatabaseService {
         ]
       );
     } catch (error: any) {
-      console.error('[Database] Error inserting service health snapshot:', error.message);
+      logger.error('[Database] Error inserting service health snapshot:', error);
     }
   }
 
@@ -1571,7 +2761,7 @@ export class DatabaseService {
         labels: row.labels,
       }));
     } catch (error: any) {
-      console.error('[Database] Error getting recent metrics:', error.message);
+      logger.error('[Database] Error getting recent metrics:', error);
       return [];
     }
   }
@@ -1620,7 +2810,7 @@ export class DatabaseService {
       const result = await this.pool.query(query, params);
       return result.rows;
     } catch (error: any) {
-      console.error('[Database] Error getting service health history:', error.message);
+      logger.error('[Database] Error getting service health history:', error);
       return [];
     }
   }
@@ -1648,12 +2838,12 @@ export class DatabaseService {
       const healthDeleted = healthResult.rowCount || 0;
 
       if (metricsDeleted > 0 || healthDeleted > 0) {
-        console.log(`[Database] Pruned ${metricsDeleted} metrics and ${healthDeleted} health snapshots older than ${keepDays} days`);
+        logger.info(`[Database] Pruned ${metricsDeleted} metrics and ${healthDeleted} health snapshots older than ${keepDays} days`);
       }
 
       return { metricsDeleted, healthDeleted };
     } catch (error: any) {
-      console.error('[Database] Error pruning old metrics:', error.message);
+      logger.error('[Database] Error pruning old metrics:', error);
       return { metricsDeleted: 0, healthDeleted: 0 };
     }
   }
@@ -1662,10 +2852,11 @@ export class DatabaseService {
    * Close the database connection
    */
   async close(): Promise<void> {
-    if (this.pool) {
-      await this.pool.end();
+    if (this.pool && this.isConnected) {
       this.isConnected = false;
-      console.log('[Database] Connection closed');
+      await this.pool.end();
+      this.pool = null;
+      logger.info('[Database] Connection closed');
     }
   }
 }

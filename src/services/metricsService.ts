@@ -6,6 +6,7 @@
  */
 
 import client from 'prom-client';
+import { logger } from '../utils/logger.js';
 
 // Create a Registry to hold all metrics
 const register = new client.Registry();
@@ -369,7 +370,7 @@ export class MetricsService {
       this.lastUpdateTime = Date.now();
     }, intervalMs);
     
-    console.log(`[Metrics] Started periodic updates every ${intervalMs}ms`);
+    logger.info(`[Metrics] Started periodic updates every ${intervalMs}ms`);
   }
 
   /**
@@ -380,7 +381,7 @@ export class MetricsService {
       clearInterval(this.updateInterval);
       this.updateInterval = null;
     }
-    console.log('[Metrics] Stopped');
+    logger.info('[Metrics] Stopped');
   }
 }
 

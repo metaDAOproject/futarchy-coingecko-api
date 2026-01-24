@@ -9,10 +9,10 @@
     "@types/supertest": "^6.0.3"
   },
   "scripts": {
-    "dev": "bun --watch src/server.ts",
+    "dev": "bun --watch src/main.ts",
     "build": "tsc",
-    "start": "bun dist/server.js",
-    "prestart": "npm run build",
+    "start": "bun dist/main.js",
+    "prestart": "bun run build",
     "test": "bun test",
     "backfill": "bun run scripts/backfill.ts",
     "backfill:daily": "bun run scripts/backfill.ts daily",

@@ -1,0 +1,196 @@
+import { Router, type Request, type Response } from 'express';
+import type { ServiceGetters } from './types.js';
+
+export function createHealthRouter(services: ServiceGetters): Router {
+  const router = Router();
+  const { getDatabaseService, getDuneCacheService, getHourlyAggregationService, getTenMinuteVolumeFetcherService } = services;
+
+  // Basic health check
+  router.get('/health', (req: Request, res: Response) => {
+    const duneCacheService = getDuneCacheService();
+    const cacheStatus = duneCacheService?.getCacheStatus();
+    
+    res.json({
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      duneCache: cacheStatus ? {
+        lastUpdated: cacheStatus.lastUpdated.toISOString(),
+        isRefreshing: cacheStatus.isRefreshing,
+        poolMetricsCount: cacheStatus.poolMetricsCount,
+        cacheAgeSeconds: Math.round(cacheStatus.cacheAgeMs / 1000),
+        isInitialized: cacheStatus.isInitialized,
+      } : null,
+    });
+  });
+
+  // Comprehensive health check
+  router.get('/api/health', async (req: Request, res: Response) => {
+    const databaseService = getDatabaseService();
+    const duneCacheService = getDuneCacheService();
+    const hourlyAggregationService = getHourlyAggregationService();
+    const tenMinuteVolumeFetcherService = getTenMinuteVolumeFetcherService();
+
+    const health: Record<string, any> = {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      services: {},
+      database: {
+        connected: databaseService.isAvailable(),
+      },
+    };
+
+    if (duneCacheService) {
+      const status = duneCacheService.getCacheStatus();
+      health.services.dune_cache = {
+        initialized: status.isInitialized,
+        refreshing: status.isRefreshing,
+        lastRefreshTime: status.lastUpdated ? status.lastUpdated.toISOString() : null,
+      };
+    }
+
+    if (hourlyAggregationService) {
+      health.services.hourly_volume = {
+        initialized: hourlyAggregationService.isInitialized,
+        databaseConnected: hourlyAggregationService.isDatabaseConnected(),
+      };
+    }
+
+    if (tenMinuteVolumeFetcherService) {
+      const status = tenMinuteVolumeFetcherService.getStatus();
+      health.services.ten_minute_volume = {
+        initialized: status.initialized,
+        running: status.isRunning,
+        refreshing: status.refreshInProgress,
+        lastRefreshTime: status.lastRefreshTime,
+      };
+    }
+
+    const hasUnhealthyService = Object.values(health.services).some(
+      (s: any) => s.initialized === false
+    );
+    
+    if (!databaseService.isAvailable()) {
+      health.status = 'degraded';
+      health.message = 'Database not connected';
+    } else if (hasUnhealthyService) {
+      health.status = 'degraded';
+      health.message = 'One or more services not initialized';
+    }
+
+    res.json(health);
+  });
+
+  // Health history
+  router.get('/api/health/history', async (req: Request, res: Response) => {
+    const databaseService = getDatabaseService();
+    
+    if (!databaseService.isAvailable()) {
+      return res.status(503).json({
+        error: 'Database not connected',
+        message: 'Health history requires database connection',
+      });
+    }
+
+    try {
+      const serviceName = req.query.service as string | undefined;
+      const hours = parseInt(req.query.hours as string) || 24;
+
+      const data = await databaseService.getServiceHealthHistory(serviceName, hours);
+      
+      res.json({
+        service: serviceName || 'all',
+        hours,
+        count: data.length,
+        data,
+      });
+    } catch (error: any) {
+      res.status(500).json({
+        error: 'Failed to get health history',
+        message: error.message,
+      });
+    }
+  });
+
+  // Manual health snapshot trigger
+  router.post('/api/health/snapshot', async (req: Request, res: Response) => {
+    const databaseService = getDatabaseService();
+    
+    if (!databaseService.isAvailable()) {
+      return res.status(503).json({
+        error: 'Database not connected',
+      });
+    }
+
+    try {
+      await saveHealthSnapshots(services);
+      res.json({ message: 'Health snapshot saved successfully' });
+    } catch (error: any) {
+      res.status(500).json({
+        error: 'Failed to save health snapshot',
+        message: error.message,
+      });
+    }
+  });
+
+  return router;
+}
+
+// Helper function to save health snapshots
+export async function saveHealthSnapshots(services: ServiceGetters): Promise<void> {
+  const databaseService = services.getDatabaseService();
+  const duneCacheService = services.getDuneCacheService();
+  const hourlyAggregationService = services.getHourlyAggregationService();
+  const tenMinuteVolumeFetcherService = services.getTenMinuteVolumeFetcherService();
+
+  if (!databaseService.isAvailable()) return;
+
+  if (duneCacheService) {
+    const status = duneCacheService.getCacheStatus();
+    await databaseService.insertServiceHealthSnapshot(
+      'dune_cache',
+      status.isInitialized,
+      status.lastUpdated,
+      undefined,
+      undefined,
+      { isRefreshing: status.isRefreshing }
+    );
+  }
+
+  if (hourlyAggregationService) {
+    const recordCount = await databaseService.getHourlyRecordCount();
+    await databaseService.insertServiceHealthSnapshot(
+      'hourly_volume',
+      hourlyAggregationService.isInitialized,
+      undefined,
+      recordCount,
+      undefined,
+      { databaseConnected: hourlyAggregationService.isDatabaseConnected() }
+    );
+  }
+
+  if (tenMinuteVolumeFetcherService) {
+    const status = tenMinuteVolumeFetcherService.getStatus();
+    const recordCount = await databaseService.getTenMinuteRecordCount();
+    await databaseService.insertServiceHealthSnapshot(
+      'ten_minute_volume',
+      status.initialized,
+      status.lastRefreshTime ? new Date(status.lastRefreshTime) : undefined,
+      recordCount,
+      undefined,
+      { isRunning: status.isRunning, refreshInProgress: status.refreshInProgress }
+    );
+  }
+
+  const dailyCount = await databaseService.getDailyRecordCount();
+  const hourlyCount = await databaseService.getHourlyRecordCount();
+  const tenMinCount = await databaseService.getTenMinuteRecordCount();
+  const buySellCount = await databaseService.getBuySellRecordCount();
+
+  await databaseService.insertMetricsBatch([
+    { name: 'database_record_count', value: dailyCount, labels: { table: 'daily_volumes' } },
+    { name: 'database_record_count', value: hourlyCount, labels: { table: 'hourly_volumes' } },
+    { name: 'database_record_count', value: tenMinCount, labels: { table: 'ten_minute_volumes' } },
+    { name: 'database_record_count', value: buySellCount, labels: { table: 'daily_buy_sell_volumes' } },
+  ]);
+}

@@ -2,6 +2,8 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import { config } from '../config.js';
 import BN from 'bn.js';
+import { retry, isTransientError, createRetryLogger } from '../utils/resilience.js';
+import { logger } from '../utils/logger.js';
 
 export interface TokenSupplyInfo {
   mint: string;
@@ -96,6 +98,19 @@ export class SolanaService {
   }
 
   /**
+   * Retry wrapper for RPC calls with exponential backoff.
+   */
+  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+    return retry(fn, {
+      maxRetries: 3,
+      initialDelayMs: 1000,
+      maxDelayMs: 5000,
+      isRetryable: isTransientError,
+      onRetry: createRetryLogger('[Solana]'),
+    });
+  }
+
+  /**
    * Validate if a string is a valid Solana public key
    */
   isValidPublicKey(address: string): boolean {
@@ -119,7 +134,7 @@ export class SolanaService {
 
     try {
       const mintPubkey = new PublicKey(mintAddress);
-      const mintInfo = await getMint(this.connection, mintPubkey);
+      const mintInfo = await this.withRetry(() => getMint(this.connection, mintPubkey));
       const supply = Number(mintInfo.supply);
       const decimals = mintInfo.decimals;
 
@@ -129,7 +144,7 @@ export class SolanaService {
       this.setCache(cacheKey, result);
       return result;
     } catch (error) {
-      console.error(`Error fetching total supply for ${mintAddress}:`, error);
+      logger.error(`Error fetching total supply for ${mintAddress}:`, error);
       throw new Error(`Failed to fetch total supply for token: ${mintAddress}`);
     }
   }
@@ -150,7 +165,7 @@ export class SolanaService {
 
     try {
       const mintPubkey = new PublicKey(mintAddress);
-      const mintInfo = await getMint(this.connection, mintPubkey);
+      const mintInfo = await this.withRetry(() => getMint(this.connection, mintPubkey));
       let supply = new BN(mintInfo.supply.toString());
       const decimals = mintInfo.decimals;
 
@@ -169,7 +184,7 @@ export class SolanaService {
       this.setCache(cacheKey, result);
       return result;
     } catch (error) {
-      console.error(`Error fetching circulating supply for ${mintAddress}:`, error);
+      logger.error(`Error fetching circulating supply for ${mintAddress}:`, error);
       throw new Error(`Failed to fetch circulating supply for token: ${mintAddress}`);
     }
   }
@@ -190,7 +205,7 @@ export class SolanaService {
 
     try {
       const mintPubkey = new PublicKey(mintAddress);
-      const mintInfo = await getMint(this.connection, mintPubkey);
+      const mintInfo = await this.withRetry(() => getMint(this.connection, mintPubkey));
       const rawSupply = mintInfo.supply.toString();
       const totalSupplyBN = new BN(mintInfo.supply.toString());
       const decimals = mintInfo.decimals;
@@ -282,7 +297,7 @@ export class SolanaService {
       this.setCache(cacheKey, result);
       return result;
     } catch (error) {
-      console.error(`Error fetching supply info for ${mintAddress}:`, error);
+      logger.error(`Error fetching supply info for ${mintAddress}:`, error);
       throw new Error(`Failed to fetch supply info for token: ${mintAddress}`);
     }
   }

@@ -4,6 +4,8 @@ import { FutarchyClient } from "@metadaoproject/futarchy/v0.6";
 import { getMint, getAssociatedTokenAddress, getAccount } from '@solana/spl-token';
 import { config } from '../config.js';
 import BN from 'bn.js';
+import { retry, isTransientError, createRetryLogger } from '../utils/resilience.js';
+import { logger } from '../utils/logger.js';
 
 export interface PoolData {
   baseReserves: BN;
@@ -88,31 +90,21 @@ export class FutarchyService {
     maxRetries: number = 3,
     baseDelay: number = 1000
   ): Promise<T> {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        return await fn();
-      } catch (error: any) {
-      const isRateLimited = this.isRateLimitError(error);
-      
-      if (isRateLimited) {
-        this.rateLimitErrors++;
-        this.lastRateLimitTime = Date.now();
-        const delay = baseDelay * Math.pow(2, attempt);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        continue;
-      }
-        
-        // If it's the last attempt or not a rate limit error, throw
-        if (attempt === maxRetries - 1) {
-          throw error;
+    return retry(fn, {
+      maxRetries,
+      initialDelayMs: baseDelay,
+      maxDelayMs: 10000,
+      isRetryable: (error) => {
+        // Track rate limit errors for monitoring
+        if (this.isRateLimitError(error)) {
+          this.rateLimitErrors++;
+          this.lastRateLimitTime = Date.now();
+          return true;
         }
-        
-        // For other errors, wait a bit and retry
-        const delay = baseDelay * Math.pow(2, attempt);
-        await new Promise(resolve => setTimeout(resolve, delay));
-      }
-    }
-    throw new Error('Max retries exceeded');
+        return isTransientError(error);
+      },
+      onRetry: createRetryLogger('[Solana]'),
+    });
   }
 
   private getCached<T>(key: string, ttl: number): T | null {
@@ -142,9 +134,9 @@ export class FutarchyService {
     } catch (error: any) {
       const isRateLimited = this.isRateLimitError(error);
       if (isRateLimited) {
-        console.error(`Rate limited while fetching DAO ${daoPubkey.toString()}:`, error);
+        logger.error(`Rate limited while fetching DAO ${daoPubkey.toString()}:`, error);
       } else {
-        console.error(`Error fetching DAO ${daoPubkey.toString()}:`, error);
+        logger.error(`Error fetching DAO ${daoPubkey.toString()}:`, error);
       }
       throw error;
     }
@@ -377,9 +369,9 @@ export class FutarchyService {
       } catch (error: any) {
         const isRateLimited = this.isRateLimitError(error);
         if (isRateLimited) {
-          console.error('Rate limited while fetching all DAOs:', error);
+          logger.error('Rate limited while fetching all DAOs:', error);
         } else {
-          console.error('Error fetching all DAOs:', error);
+          logger.error('Error fetching all DAOs:', error);
         }
         throw error;
       }
@@ -448,7 +440,7 @@ export class FutarchyService {
               treasuryUsdcAum = usdcBalance || undefined;
             } catch (error: any) {
               // If vault address is invalid or balance can't be fetched, continue without it
-              console.warn(`Could not fetch USDC balance for vault ${dao.squads_multisig_vault} for DAO ${daoAddress.toString()}:`, error.message);
+              logger.warn(`Could not fetch USDC balance for vault ${dao.squads_multisig_vault} for DAO ${daoAddress.toString()}:`, { error: error.message });
             }
           }
           
@@ -477,13 +469,13 @@ export class FutarchyService {
       }
       
       if (this.rateLimitErrors > 0) {
-        console.warn(`⚠️  Encountered ${this.rateLimitErrors} rate limit errors during processing`);
+        logger.warn(`⚠️  Encountered ${this.rateLimitErrors} rate limit errors during processing`);
       }
       
       this.setCache(cacheKey, validDaoData);
       return validDaoData;
     } catch (error) {
-      console.error('Error fetching all DAOs:', error);
+      logger.error('Error fetching all DAOs:', error);
       throw error;
     }
   }
