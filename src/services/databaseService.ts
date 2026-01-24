@@ -69,6 +69,13 @@ export interface DailyBuySellVolumeRecord {
   high: string;
   low: string;
   trade_count: number;
+  average_price: string;
+  usdc_fees: string;
+  token_fees: string;
+  token_fees_usdc: string;
+  sell_volume_usdc: string;
+  sell_volume: string;
+  buy_volume: string;
 }
 
 export interface DailyFeesVolumeRecord {
@@ -1492,7 +1499,7 @@ export class DatabaseService {
       return { tenMinuteUpdated: 0, hourlyUpdated: 0, dailyUpdated: 0 };
     }
 
-    logger.info('[Database] Starting backfill of missing extended fields...');
+    logger.info('[Database] Starting backfill of missing extended fields using DB aggregation functions...');
     const results = {
       tenMinuteUpdated: 0,
       hourlyUpdated: 0,
@@ -1500,119 +1507,191 @@ export class DatabaseService {
     };
 
     try {
-      // 1. Backfill hourly records from 10-minute data (for records missing extended fields)
-      logger.info('[Database] Backfilling hourly records from 10-minute data...');
-      const hourlyResult = await this.pool.query(`
-        WITH aggregated AS (
-          SELECT 
-            tmv.token,
-            date_trunc('hour', tmv.bucket) AS hour,
-            SUM(tmv.base_volume) AS base_volume,
-            SUM(tmv.target_volume) AS target_volume,
-            SUM(tmv.buy_volume) AS buy_volume,
-            SUM(tmv.sell_volume) AS sell_volume,
-            MAX(tmv.high) AS high,
-            MIN(CASE WHEN tmv.low > 0 THEN tmv.low END) AS low,
-            CASE 
-              WHEN SUM(tmv.base_volume) > 0 
-              THEN SUM(tmv.average_price * tmv.base_volume) / SUM(tmv.base_volume)
-              ELSE AVG(tmv.average_price)
-            END AS average_price,
-            SUM(tmv.trade_count) AS trade_count,
-            SUM(tmv.usdc_fees) AS usdc_fees,
-            SUM(tmv.token_fees) AS token_fees,
-            SUM(tmv.token_fees_usdc) AS token_fees_usdc,
-            SUM(tmv.sell_volume_usdc) AS sell_volume_usdc
-          FROM ten_minute_volumes tmv
-          WHERE tmv.buy_volume IS NOT NULL AND tmv.buy_volume > 0
-          GROUP BY tmv.token, date_trunc('hour', tmv.bucket)
+      // 1. Find all hours that have 10-minute data but missing/zero extended fields
+      logger.info('[Database] Finding hours with missing extended fields that have 10-minute data...');
+      const hoursToUpdate = await this.pool.query(`
+        SELECT DISTINCT 
+          hv.token,
+          hv.hour
+        FROM hourly_volumes hv
+        WHERE EXISTS (
+          SELECT 1 
+          FROM ten_minute_volumes tmv 
+          WHERE tmv.token = hv.token 
+            AND date_trunc('hour', tmv.bucket) = hv.hour
         )
-        UPDATE hourly_volumes hv
-        SET 
-          buy_volume = COALESCE(NULLIF(hv.buy_volume, 0), a.buy_volume),
-          sell_volume = COALESCE(NULLIF(hv.sell_volume, 0), a.sell_volume),
-          average_price = COALESCE(NULLIF(hv.average_price, 0), a.average_price),
-          usdc_fees = COALESCE(NULLIF(hv.usdc_fees, 0), a.usdc_fees),
-          token_fees = COALESCE(NULLIF(hv.token_fees, 0), a.token_fees),
-          token_fees_usdc = COALESCE(NULLIF(hv.token_fees_usdc, 0), a.token_fees_usdc),
-          sell_volume_usdc = COALESCE(NULLIF(hv.sell_volume_usdc, 0), a.sell_volume_usdc),
-          updated_at = CURRENT_TIMESTAMP
-        FROM aggregated a
-        WHERE hv.token = a.token 
-          AND hv.hour = a.hour
-          AND (
-            hv.buy_volume IS NULL OR hv.buy_volume = 0 OR
-            hv.sell_volume IS NULL OR hv.sell_volume = 0 OR
-            hv.average_price IS NULL OR hv.average_price = 0
-          )
-        RETURNING hv.id
+        AND (
+          hv.average_price IS NULL OR hv.average_price = 0 OR
+          hv.usdc_fees IS NULL OR hv.usdc_fees = 0 OR
+          hv.sell_volume_usdc IS NULL OR hv.sell_volume_usdc = 0 OR
+          hv.buy_volume IS NULL OR hv.buy_volume = 0 OR
+          hv.sell_volume IS NULL OR hv.sell_volume = 0 OR
+          hv.token_fees IS NULL OR hv.token_fees = 0 OR
+          hv.token_fees_usdc IS NULL OR hv.token_fees_usdc = 0
+        )
+        ORDER BY hv.token, hv.hour
       `);
-      results.hourlyUpdated = hourlyResult.rowCount || 0;
-      logger.info(`[Database] Updated ${results.hourlyUpdated} hourly records with missing fields`);
 
-      // 2. Backfill daily records from hourly data (for records missing extended fields)
-      logger.info('[Database] Backfilling daily records from hourly data...');
-      const dailyResult = await this.pool.query(`
-        WITH aggregated AS (
-          SELECT 
-            hv.token,
-            date_trunc('day', hv.hour)::DATE AS date,
-            SUM(hv.base_volume) AS base_volume,
-            SUM(hv.target_volume) AS target_volume,
-            SUM(hv.buy_volume) AS buy_volume,
-            SUM(hv.sell_volume) AS sell_volume,
-            MAX(hv.high) AS high,
-            MIN(CASE WHEN hv.low > 0 THEN hv.low END) AS low,
-            CASE 
-              WHEN SUM(hv.base_volume) > 0 
-              THEN SUM(hv.average_price * hv.base_volume) / SUM(hv.base_volume)
-              ELSE AVG(hv.average_price)
-            END AS average_price,
-            SUM(hv.trade_count) AS trade_count,
-            SUM(hv.usdc_fees) AS usdc_fees,
-            SUM(hv.token_fees) AS token_fees,
-            SUM(hv.token_fees_usdc) AS token_fees_usdc,
-            SUM(hv.sell_volume_usdc) AS sell_volume_usdc
-          FROM hourly_volumes hv
-          WHERE hv.buy_volume IS NOT NULL AND hv.buy_volume > 0
-          GROUP BY hv.token, date_trunc('day', hv.hour)::DATE
-        ),
-        cumulative AS (
-          SELECT 
-            a.*,
-            SUM(a.usdc_fees) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_usdc_fees,
-            SUM(a.token_fees_usdc) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_token_in_usdc_fees,
-            SUM(a.target_volume) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_target_volume,
-            SUM(a.base_volume) OVER (PARTITION BY a.token ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cumulative_token_volume
-          FROM aggregated a
+      logger.info(`[Database] Found ${hoursToUpdate.rows.length} hours to update from 10-minute data`);
+
+      // Process each hour using the DB aggregation function
+      if (hoursToUpdate.rows.length > 0) {
+        logger.info('[Database] Backfilling hourly records from 10-minute data using aggregate_10min_to_hourly function...');
+        
+        for (const row of hoursToUpdate.rows) {
+          try {
+            // Call the DB function for this specific hour
+            const aggregated = await this.pool.query(
+              `SELECT * FROM aggregate_10min_to_hourly($1, $2)`,
+              [row.token, row.hour]
+            );
+
+            if (aggregated.rows.length > 0) {
+              const agg = aggregated.rows[0];
+              
+              // Only update if we have valid aggregated data (not all NULL)
+              if (agg.average_price != null || agg.usdc_fees != null || agg.sell_volume_usdc != null) {
+                // Update the hourly record with aggregated values, only updating fields that are 0 or NULL
+                await this.pool.query(
+                  `UPDATE hourly_volumes
+                  SET 
+                    buy_volume = CASE WHEN $1 IS NOT NULL THEN COALESCE(NULLIF(buy_volume, 0), $1) ELSE buy_volume END,
+                    sell_volume = CASE WHEN $2 IS NOT NULL THEN COALESCE(NULLIF(sell_volume, 0), $2) ELSE sell_volume END,
+                    average_price = CASE WHEN $3 IS NOT NULL THEN COALESCE(NULLIF(average_price, 0), $3) ELSE average_price END,
+                    usdc_fees = CASE WHEN $4 IS NOT NULL THEN COALESCE(NULLIF(usdc_fees, 0), $4) ELSE usdc_fees END,
+                    token_fees = CASE WHEN $5 IS NOT NULL THEN COALESCE(NULLIF(token_fees, 0), $5) ELSE token_fees END,
+                    token_fees_usdc = CASE WHEN $6 IS NOT NULL THEN COALESCE(NULLIF(token_fees_usdc, 0), $6) ELSE token_fees_usdc END,
+                    sell_volume_usdc = CASE WHEN $7 IS NOT NULL THEN COALESCE(NULLIF(sell_volume_usdc, 0), $7) ELSE sell_volume_usdc END,
+                    updated_at = CURRENT_TIMESTAMP
+                  WHERE token = $8 AND hour = $9
+                    AND (
+                      average_price IS NULL OR average_price = 0 OR
+                      usdc_fees IS NULL OR usdc_fees = 0 OR
+                      sell_volume_usdc IS NULL OR sell_volume_usdc = 0 OR
+                      buy_volume IS NULL OR buy_volume = 0 OR
+                      sell_volume IS NULL OR sell_volume = 0 OR
+                      token_fees IS NULL OR token_fees = 0 OR
+                      token_fees_usdc IS NULL OR token_fees_usdc = 0
+                    )`,
+                  [
+                    agg.buy_volume,
+                    agg.sell_volume,
+                    agg.average_price,
+                    agg.usdc_fees,
+                    agg.token_fees,
+                    agg.token_fees_usdc,
+                    agg.sell_volume_usdc,
+                    row.token,
+                    row.hour,
+                  ]
+                );
+                results.hourlyUpdated++;
+              }
+            }
+          } catch (error: any) {
+            logger.error(`[Database] Error updating hour ${row.hour} for token ${row.token}:`, error);
+          }
+        }
+        logger.info(`[Database] Updated ${results.hourlyUpdated} hourly records with missing fields`);
+      }
+
+      // 2. Find all days that have hourly data but missing/zero extended fields
+      logger.info('[Database] Finding days with missing extended fields that have hourly data...');
+      const daysToUpdate = await this.pool.query(`
+        SELECT DISTINCT 
+          dv.token,
+          dv.date
+        FROM daily_volumes dv
+        WHERE EXISTS (
+          SELECT 1 
+          FROM hourly_volumes hv 
+          WHERE hv.token = dv.token 
+            AND date_trunc('day', hv.hour)::DATE = dv.date
         )
-        UPDATE daily_volumes dv
-        SET 
-          buy_volume = COALESCE(NULLIF(dv.buy_volume, 0), c.buy_volume),
-          sell_volume = COALESCE(NULLIF(dv.sell_volume, 0), c.sell_volume),
-          average_price = COALESCE(NULLIF(dv.average_price, 0), c.average_price),
-          trade_count = COALESCE(NULLIF(dv.trade_count, 0), c.trade_count),
-          usdc_fees = COALESCE(NULLIF(dv.usdc_fees, 0), c.usdc_fees),
-          token_fees = COALESCE(NULLIF(dv.token_fees, 0), c.token_fees),
-          token_fees_usdc = COALESCE(NULLIF(dv.token_fees_usdc, 0), c.token_fees_usdc),
-          sell_volume_usdc = COALESCE(NULLIF(dv.sell_volume_usdc, 0), c.sell_volume_usdc),
-          cumulative_usdc_fees = COALESCE(NULLIF(dv.cumulative_usdc_fees, 0), c.cumulative_usdc_fees),
-          cumulative_token_in_usdc_fees = COALESCE(NULLIF(dv.cumulative_token_in_usdc_fees, 0), c.cumulative_token_in_usdc_fees),
-          cumulative_target_volume = COALESCE(NULLIF(dv.cumulative_target_volume, 0), c.cumulative_target_volume),
-          cumulative_token_volume = COALESCE(NULLIF(dv.cumulative_token_volume, 0), c.cumulative_token_volume),
-          updated_at = CURRENT_TIMESTAMP
-        FROM cumulative c
-        WHERE dv.token = c.token 
-          AND dv.date = c.date
-          AND (
-            dv.buy_volume IS NULL OR dv.buy_volume = 0 OR
-            dv.sell_volume IS NULL OR dv.sell_volume = 0 OR
-            dv.average_price IS NULL OR dv.average_price = 0
-          )
-        RETURNING dv.id
+        AND (
+          dv.average_price IS NULL OR dv.average_price = 0 OR
+          dv.usdc_fees IS NULL OR dv.usdc_fees = 0 OR
+          dv.sell_volume_usdc IS NULL OR dv.sell_volume_usdc = 0 OR
+          dv.buy_volume IS NULL OR dv.buy_volume = 0 OR
+          dv.sell_volume IS NULL OR dv.sell_volume = 0 OR
+          dv.token_fees IS NULL OR dv.token_fees = 0 OR
+          dv.token_fees_usdc IS NULL OR dv.token_fees_usdc = 0
+        )
+        ORDER BY dv.token, dv.date
       `);
-      results.dailyUpdated = dailyResult.rowCount || 0;
-      logger.info(`[Database] Updated ${results.dailyUpdated} daily records with missing fields`);
+
+      logger.info(`[Database] Found ${daysToUpdate.rows.length} days to update from hourly data`);
+
+      // Process each day using the DB aggregation function
+      if (daysToUpdate.rows.length > 0) {
+        logger.info('[Database] Backfilling daily records from hourly data using aggregate_hourly_to_daily function...');
+        
+        for (const row of daysToUpdate.rows) {
+          try {
+            // Call the DB function for this specific day
+            const aggregated = await this.pool.query(
+              `SELECT * FROM aggregate_hourly_to_daily($1, $2)`,
+              [row.token, row.date]
+            );
+
+            if (aggregated.rows.length > 0) {
+              const agg = aggregated.rows[0];
+              
+              // Only update if we have valid aggregated data (not all NULL)
+              if (agg.average_price != null || agg.usdc_fees != null || agg.sell_volume_usdc != null) {
+                // Update the daily record with aggregated values, only updating fields that are 0 or NULL
+                await this.pool.query(
+                  `UPDATE daily_volumes
+                  SET 
+                    buy_volume = CASE WHEN $1 IS NOT NULL THEN COALESCE(NULLIF(buy_volume, 0), $1) ELSE buy_volume END,
+                    sell_volume = CASE WHEN $2 IS NOT NULL THEN COALESCE(NULLIF(sell_volume, 0), $2) ELSE sell_volume END,
+                    average_price = CASE WHEN $3 IS NOT NULL THEN COALESCE(NULLIF(average_price, 0), $3) ELSE average_price END,
+                    trade_count = CASE WHEN $4 IS NOT NULL THEN COALESCE(NULLIF(trade_count, 0), $4) ELSE trade_count END,
+                    usdc_fees = CASE WHEN $5 IS NOT NULL THEN COALESCE(NULLIF(usdc_fees, 0), $5) ELSE usdc_fees END,
+                    token_fees = CASE WHEN $6 IS NOT NULL THEN COALESCE(NULLIF(token_fees, 0), $6) ELSE token_fees END,
+                    token_fees_usdc = CASE WHEN $7 IS NOT NULL THEN COALESCE(NULLIF(token_fees_usdc, 0), $7) ELSE token_fees_usdc END,
+                    sell_volume_usdc = CASE WHEN $8 IS NOT NULL THEN COALESCE(NULLIF(sell_volume_usdc, 0), $8) ELSE sell_volume_usdc END,
+                    cumulative_usdc_fees = CASE WHEN $9 IS NOT NULL THEN COALESCE(NULLIF(cumulative_usdc_fees, 0), $9) ELSE cumulative_usdc_fees END,
+                    cumulative_token_in_usdc_fees = CASE WHEN $10 IS NOT NULL THEN COALESCE(NULLIF(cumulative_token_in_usdc_fees, 0), $10) ELSE cumulative_token_in_usdc_fees END,
+                    cumulative_target_volume = CASE WHEN $11 IS NOT NULL THEN COALESCE(NULLIF(cumulative_target_volume, 0), $11) ELSE cumulative_target_volume END,
+                    cumulative_token_volume = CASE WHEN $12 IS NOT NULL THEN COALESCE(NULLIF(cumulative_token_volume, 0), $12) ELSE cumulative_token_volume END,
+                    updated_at = CURRENT_TIMESTAMP
+                  WHERE token = $13 AND date = $14
+                    AND (
+                      average_price IS NULL OR average_price = 0 OR
+                      usdc_fees IS NULL OR usdc_fees = 0 OR
+                      sell_volume_usdc IS NULL OR sell_volume_usdc = 0 OR
+                      buy_volume IS NULL OR buy_volume = 0 OR
+                      sell_volume IS NULL OR sell_volume = 0 OR
+                      token_fees IS NULL OR token_fees = 0 OR
+                      token_fees_usdc IS NULL OR token_fees_usdc = 0
+                    )`,
+                  [
+                    agg.buy_volume,
+                    agg.sell_volume,
+                    agg.average_price,
+                    agg.trade_count,
+                    agg.usdc_fees,
+                    agg.token_fees,
+                    agg.token_fees_usdc,
+                    agg.sell_volume_usdc,
+                    agg.cumulative_usdc_fees,
+                    agg.cumulative_token_in_usdc_fees,
+                    agg.cumulative_target_volume,
+                    agg.cumulative_token_volume,
+                    row.token,
+                    row.date,
+                  ]
+                );
+                results.dailyUpdated++;
+              }
+            }
+          } catch (error: any) {
+            logger.error(`[Database] Error updating day ${row.date} for token ${row.token}:`, error);
+          }
+        }
+        logger.info(`[Database] Updated ${results.dailyUpdated} daily records with missing fields`);
+      }
 
       logger.info('[Database] Backfill completed:', { results });
       return results;
@@ -2095,6 +2174,13 @@ export class DatabaseService {
     high: string;
     low: string;
     trade_count: number;
+    average_price: string;
+    usdc_fees: string;
+    token_fees: string;
+    token_fees_usdc: string;
+    sell_volume_usdc: string;
+    sell_volume: string;
+    buy_volume: string;
   }[]> {
     if (!this.pool || !this.isConnected) return [];
 
@@ -2135,12 +2221,19 @@ export class DatabaseService {
           date::text,
           base_volume::text,
           target_volume::text,
-          buy_usdc_volume::text,
-          sell_token_volume::text,
+          buy_volume::text,
+          buy_volume::text as buy_usdc_volume,
+          sell_volume::text,
+          sell_volume::text as sell_token_volume,
           high::text,
           low::text,
-          trade_count
-         FROM daily_buy_sell_volumes
+          trade_count,
+          average_price::text,
+          usdc_fees::text,
+          token_fees::text,
+          token_fees_usdc::text,
+          sell_volume_usdc::text
+         FROM daily_volumes
          ${whereClause}
          ORDER BY token, date ASC`,
         params
