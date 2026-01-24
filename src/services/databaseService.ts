@@ -2318,9 +2318,9 @@ export class DatabaseService {
           const valuePlaceholders: string[] = [];
           
           batch.forEach((record, idx) => {
-            const offset = idx * 16; // 16 parameters per record
+            const offset = idx * 17; // 17 parameters per record
             valuePlaceholders.push(
-              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, $${offset + 16}, ${markComplete}, CURRENT_TIMESTAMP)`
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, $${offset + 16}, $${offset + 17}, ${markComplete}, CURRENT_TIMESTAMP)`
             );
             values.push(
               record.token,
@@ -2852,9 +2852,10 @@ export class DatabaseService {
    * Close the database connection
    */
   async close(): Promise<void> {
-    if (this.pool) {
-      await this.pool.end();
+    if (this.pool && this.isConnected) {
       this.isConnected = false;
+      await this.pool.end();
+      this.pool = null;
       logger.info('[Database] Connection closed');
     }
   }

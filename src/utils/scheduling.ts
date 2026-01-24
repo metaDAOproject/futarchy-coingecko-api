@@ -6,6 +6,8 @@
  * This prevents overlapping executions when tasks take longer than expected.
  */
 
+import { logger } from './logger.js';
+
 export interface ScheduledTask {
   stop: () => void;
   isRunning: () => boolean;
@@ -54,7 +56,7 @@ export function scheduleWithoutPileup(
       if (options.onError) {
         options.onError(err);
       } else {
-        console.error(`[${options.name}] Task error:`, err.message);
+        logger.error(`[${options.name}] Task error:`, err);
       }
     } finally {
       running = false;
@@ -75,7 +77,7 @@ export function scheduleWithoutPileup(
         clearTimeout(timeoutId);
         timeoutId = null;
       }
-      console.log(`[${options.name}] Scheduled task stopped`);
+      logger.info(`[${options.name}] Scheduled task stopped`);
     },
     isRunning: () => running,
     getLastRunTime: () => lastRunTime,
@@ -125,7 +127,7 @@ export function scheduleAtBoundary(
     nextRunTime = getNextBoundary();
     const msUntilNext = nextRunTime.getTime() - Date.now();
     
-    console.log(`[${options.name}] Next run at ${nextRunTime.toISOString()} (in ${Math.round(msUntilNext / 1000)}s)`);
+    logger.info(`[${options.name}] Next run at ${nextRunTime.toISOString()} (in ${Math.round(msUntilNext / 1000)}s)`);
     timeoutId = setTimeout(runTask, msUntilNext);
   };
 
@@ -141,7 +143,7 @@ export function scheduleAtBoundary(
       if (options.onError) {
         options.onError(err);
       } else {
-        console.error(`[${options.name}] Task error:`, err.message);
+        logger.error(`[${options.name}] Task error:`, err);
       }
     } finally {
       running = false;
@@ -158,7 +160,7 @@ export function scheduleAtBoundary(
         clearTimeout(timeoutId);
         timeoutId = null;
       }
-      console.log(`[${options.name}] Scheduled task stopped`);
+      logger.info(`[${options.name}] Scheduled task stopped`);
     },
     isRunning: () => running,
     getLastRunTime: () => lastRunTime,
@@ -210,7 +212,7 @@ export function scheduleDailyAtUTC(
     nextRunTime = getNextRun();
     const msUntilNext = nextRunTime.getTime() - Date.now();
     
-    console.log(`[${options.name}] Next run at ${nextRunTime.toISOString()} (in ${Math.round(msUntilNext / 3600000)}h)`);
+    logger.info(`[${options.name}] Next run at ${nextRunTime.toISOString()} (in ${Math.round(msUntilNext / 3600000)}h)`);
     timeoutId = setTimeout(runTask, msUntilNext);
   };
 
@@ -226,7 +228,7 @@ export function scheduleDailyAtUTC(
       if (options.onError) {
         options.onError(err);
       } else {
-        console.error(`[${options.name}] Task error:`, err.message);
+        logger.error(`[${options.name}] Task error:`, err);
       }
     } finally {
       running = false;
@@ -243,7 +245,7 @@ export function scheduleDailyAtUTC(
         clearTimeout(timeoutId);
         timeoutId = null;
       }
-      console.log(`[${options.name}] Scheduled task stopped`);
+      logger.info(`[${options.name}] Scheduled task stopped`);
     },
     isRunning: () => running,
     getLastRunTime: () => lastRunTime,

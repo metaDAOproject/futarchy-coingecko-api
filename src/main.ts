@@ -59,6 +59,14 @@ function initializeServices(): Services {
 }
 
 async function startServices(services: Services): Promise<void> {
+  // Initialize database connection first
+  const dbConnected = await services.databaseService.initialize();
+  if (dbConnected) {
+    logger.info('Database service initialized and connected');
+  } else {
+    logger.warn('Database service not available - volume history will use in-memory cache only');
+  }
+
   if (services.hourlyAggregationService) {
     logger.info('Starting Hourly Aggregation service');
     try {
