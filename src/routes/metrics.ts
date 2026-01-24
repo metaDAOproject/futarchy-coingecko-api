@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express';
 import { metricsService } from '../services/metricsService.js';
 import { parseJsonParam, parseIntParam, parseRequiredString } from '../utils/validation.js';
 import type { ServiceGetters } from './types.js';
+import { logger } from '../utils/logger.js';
 
 export function createMetricsRouter(services: ServiceGetters): Router {
   const router = Router();
@@ -15,7 +16,7 @@ export function createMetricsRouter(services: ServiceGetters): Router {
       res.set('Content-Type', metricsService.getContentType());
       res.end(await metricsService.getMetrics());
     } catch (error: any) {
-      console.error('[Metrics] Error generating metrics:', error);
+      logger.error('[Metrics] Error generating metrics:', error);
       res.status(500).end('Error generating metrics');
     }
   });
@@ -117,7 +118,7 @@ async function updateMetricsSnapshot(services: ServiceGetters): Promise<void> {
       metricsService.setDatabaseLatestDate('ten_minute_volumes', latestTenMin);
       metricsService.setDatabaseLatestDate('daily_buy_sell_volumes', latestBuySell);
     } catch (error) {
-      console.error('[Metrics] Error fetching database metrics:', error);
+      logger.error('[Metrics] Error fetching database metrics:', error);
     }
   }
 

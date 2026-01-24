@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import type { ServiceGetters } from './types.js';
+import { logger } from '../utils/logger.js';
 
 export function createAdminRouter(services: ServiceGetters): Router {
   const router = Router();
@@ -47,7 +48,7 @@ export function createAdminRouter(services: ServiceGetters): Router {
     }
 
     duneCacheService.forceRefresh().catch(err => {
-      console.error('[Cache] Force refresh failed:', err);
+      logger.error('[Cache] Force refresh failed:', err);
     });
 
     res.json({

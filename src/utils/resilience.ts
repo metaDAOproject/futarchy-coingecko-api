@@ -3,6 +3,8 @@
  * Provides timeout and retry mechanisms for Dune, Solana RPC, and other external services.
  */
 
+import { logger } from './logger.js';
+
 export interface RetryOptions {
   /** Maximum number of retry attempts (default: 3) */
   maxRetries?: number;
@@ -235,7 +237,7 @@ export function isTransientError(error: unknown): boolean {
 export function createRetryLogger(prefix: string) {
   return (attempt: number, error: unknown, nextDelayMs: number): void => {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    console.warn(
+    logger.warn(
       `${prefix} Retry attempt ${attempt} after ${Math.round(nextDelayMs)}ms: ${errorMessage}`
     );
   };
