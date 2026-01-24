@@ -1,0 +1,52 @@
+import { Router, type Request, type Response } from 'express';
+import { config } from '../config.js';
+import type { ServiceGetters } from './types.js';
+
+export function createRootRouter(services: ServiceGetters): Router {
+  const router = Router();
+  const { getDuneCacheService } = services;
+
+  // Root endpoint with API documentation
+  router.get('/', (req: Request, res: Response) => {
+    const duneCacheService = getDuneCacheService();
+    const cacheStatus = duneCacheService?.getCacheStatus();
+    
+    res.json({
+      name: 'Futarchy AMM - CoinGecko API',
+      version: '1.0.0',
+      documentation: 'https://docs.coingecko.com/reference/exchanges-list',
+      endpoints: {
+        tickers: '/api/tickers - Returns all DAO tickers with pricing and volume',
+        supply: '/api/supply/:mintAddress - Returns complete supply breakdown with allocation details',
+        supply_total: '/api/supply/:mintAddress/total - Returns total supply only',
+        supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply (excludes team performance package)',
+        health: '/health',
+      },
+      dex: {
+        fork_type: config.dex.forkType,
+        factory_address: config.dex.factoryAddress,
+        router_address: config.dex.routerAddress,
+      },
+      supplyBreakdown: {
+        description: 'For launchpad tokens, supply is broken down into:',
+        circulatingSupply: 'Total supply minus team performance package (liquidity IS circulating)',
+        teamPerformancePackage: 'Locked tokens allocated to the team (price-based unlock) - NOT circulating',
+        futarchyAmmLiquidity: 'Tokens in the internal FutarchyAMM for spot trading - IS circulating',
+        meteoraLpLiquidity: 'Tokens in the external Meteora DAMM pool (POL) - IS circulating',
+      },
+      caching: {
+        description: 'Dune data is cached and refreshed hourly to improve response times',
+        refreshInterval: `${parseInt(process.env.DUNE_CACHE_REFRESH_INTERVAL || '3600')} seconds`,
+        fetchTimeout: `${parseInt(process.env.DUNE_FETCH_TIMEOUT || '240')} seconds`,
+        status: cacheStatus ? {
+          isInitialized: cacheStatus.isInitialized,
+          poolMetricsCount: cacheStatus.poolMetricsCount,
+          lastUpdated: cacheStatus.lastUpdated.toISOString(),
+        } : 'Not available (DUNE_API_KEY not set)',
+      },
+      note: 'This API automatically discovers and aggregates all DAOs from the Futarchy protocol.',
+    });
+  });
+
+  return router;
+}
