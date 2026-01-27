@@ -108,7 +108,7 @@ async function backfillTenMinute(
   console.log(`   Query ID: ${queryId}`);
   
   // Always backfill from the beginning
-  const startTime = new Date('2025-10-09T00:00:00Z'); // Futarchy launch date
+  const startTime = new Date('2026-01-24T00:00:00Z'); // Futarchy launch date
   const startTimeStr = startTime.toISOString().slice(0, 19).replace('T', ' ');
   console.log(`   Start time: ${startTimeStr} (always from beginning)`);
   
