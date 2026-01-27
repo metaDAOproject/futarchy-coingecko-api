@@ -3,10 +3,12 @@
  * 
  * This script backfills historical Meteora pool fee data from Dune.
  * It fetches data from 2025-10-09 to present and stores it in the database.
+ * Processes data in chunks to avoid API limits.
  * 
  * Usage: 
  *   bun run scripts/backfillMeteoraVolumes.ts
  *   RECENT_DAYS=7 bun run scripts/backfillMeteoraVolumes.ts   # Only backfill last 7 days
+ *   CHUNK_DAYS=30 bun run scripts/backfillMeteoraVolumes.ts   # Use 30-day chunks (default: 30)
  */
 
 import { DatabaseService } from '../src/services/databaseService.js';
@@ -14,15 +16,61 @@ import { DuneService } from '../src/services/duneService.js';
 import { MeteoraVolumeFetcherService } from '../src/services/meteoraVolumeFetcherService.js';
 import { config } from '../src/config.js';
 
+/**
+ * Helper to add days to a date
+ */
+function addDays(date: Date, days: number): Date {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+/**
+ * Helper to format date as YYYY-MM-DD
+ */
+function formatDate(date: Date): string {
+  return date.toISOString().split('T')[0]!;
+}
+
+/**
+ * Generate date chunks for backfilling
+ */
+function generateDateChunks(startDate: Date, endDate: Date, chunkDays: number): Array<{ start: Date; end: Date }> {
+  const chunks: Array<{ start: Date; end: Date }> = [];
+  let currentStart = new Date(startDate);
+
+  while (currentStart < endDate) {
+    const currentEnd = new Date(currentStart);
+    currentEnd.setDate(currentEnd.getDate() + chunkDays - 1);
+    
+    // Don't go past the end date
+    if (currentEnd > endDate) {
+      currentEnd.setTime(endDate.getTime());
+    }
+
+    chunks.push({
+      start: new Date(currentStart),
+      end: new Date(currentEnd),
+    });
+
+    // Move to next chunk
+    currentStart = addDays(currentEnd, 1);
+  }
+
+  return chunks;
+}
+
 async function backfillMeteoraVolumes() {
   console.log('=== Starting Meteora Volumes Backfill ===\n');
 
   // Check environment variables for options
   const recentDays = process.env.RECENT_DAYS ? parseInt(process.env.RECENT_DAYS) : null;
+  const chunkDays = process.env.CHUNK_DAYS ? parseInt(process.env.CHUNK_DAYS) : 30; // Default: 30-day chunks
 
   if (recentDays) {
     console.log(`⚠ RECENT_DAYS=${recentDays}: Will only backfill last ${recentDays} days\n`);
   }
+  console.log(`📦 Using ${chunkDays}-day chunks to avoid API limits\n`);
 
   // Initialize services
   const databaseService = new DatabaseService();
@@ -58,21 +106,26 @@ async function backfillMeteoraVolumes() {
     console.log(`   Total records: ${stats.total_records}`);
     console.log(`   Date range: ${stats.earliest_date || 'N/A'} to ${stats.latest_date || 'N/A'}\n`);
 
-    // 3. Determine start date
-    const startDate = new Date('2025-10-09');
-    let actualStartDate = startDate;
+    // 3. Determine date range
+    const launchDate = new Date('2025-10-09');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    let actualStartDate = new Date(launchDate);
+    let actualEndDate = new Date(today);
 
     if (recentDays) {
       const cutoffDate = new Date();
       cutoffDate.setDate(cutoffDate.getDate() - recentDays);
-      if (cutoffDate > startDate) {
+      cutoffDate.setHours(0, 0, 0, 0);
+      if (cutoffDate > launchDate) {
         actualStartDate = cutoffDate;
-        console.log(`   Limiting to last ${recentDays} days (since ${actualStartDate.toISOString().split('T')[0]})\n`);
+        console.log(`   Limiting to last ${recentDays} days (since ${formatDate(actualStartDate)})\n`);
       } else {
-        console.log(`   Starting from ${startDate.toISOString().split('T')[0]} (launch date)\n`);
+        console.log(`   Starting from ${formatDate(launchDate)} (launch date)\n`);
       }
     } else {
-      console.log(`   Starting from ${startDate.toISOString().split('T')[0]} (launch date)\n`);
+      console.log(`   Date range: ${formatDate(actualStartDate)} to ${formatDate(actualEndDate)}\n`);
     }
 
     // 4. Check if query ID is configured
@@ -84,42 +137,98 @@ async function backfillMeteoraVolumes() {
 
     console.log(`3. Using Dune query ID: ${config.dune.meteoraVolumeQueryId}\n`);
 
-    // 5. Initialize the service
-    console.log('4. Initializing Meteora volume service...');
-    await meteoraService.initialize();
-    console.log('✓ Service initialized\n');
+    // 5. Skip service initialization to avoid automatic backfill
+    // The backfill script handles chunked fetching manually
+    console.log('4. Ready to process chunks (skipping service auto-initialization)\n');
 
-    // 6. Perform backfill
-    console.log('5. Starting backfill from Dune...');
-    const startDateStr = actualStartDate.toISOString().split('T')[0]!;
-    
-    try {
-      const result = await meteoraService.forceRefresh();
+    // 6. Generate date chunks
+    console.log('5. Generating date chunks...');
+    const chunks = generateDateChunks(actualStartDate, actualEndDate, chunkDays);
+    console.log(`   Generated ${chunks.length} chunks of ${chunkDays} days each\n`);
+
+    // 7. Process chunks
+    console.log('6. Processing chunks from Dune...\n');
+    let totalRecords = 0;
+    let processedChunks = 0;
+    let errors = 0;
+    let apiLimitHit = false;
+
+    for (let chunkIdx = 0; chunkIdx < chunks.length; chunkIdx++) {
+      const chunk = chunks[chunkIdx]!;
+      const chunkStart = formatDate(chunk.start);
+      const chunkEnd = formatDate(chunk.end);
       
-      if (result.success) {
-        console.log(`✓ Backfill completed successfully`);
-        console.log(`  ${result.message}`);
-        if (result.recordsUpserted !== undefined) {
-          console.log(`  Records upserted: ${result.recordsUpserted}`);
+      console.log(`   [${chunkIdx + 1}/${chunks.length}] Processing ${chunkStart} to ${chunkEnd}...`);
+
+      try {
+        // Check if this chunk already has data
+        const existingCheck = await databaseService.pool!.query(`
+          SELECT COUNT(*) as count
+          FROM daily_meteora_volumes
+          WHERE date >= $1 AND date <= $2
+        `, [chunkStart, chunkEnd]);
+
+        const existingCount = parseInt(existingCheck.rows[0]!.count);
+        if (existingCount > 0) {
+          console.log(`      ⏭️  Skipping (${existingCount} records already exist)`);
+          processedChunks++;
+          continue;
         }
-      } else {
-        console.error(`✗ Backfill failed: ${result.message}`);
-        process.exit(1);
+
+        // Fetch chunk from Dune
+        const recordsUpserted = await meteoraService.fetchDateRange(chunkStart, chunkEnd);
+        
+        if (recordsUpserted > 0) {
+          totalRecords += recordsUpserted;
+          console.log(`      ✓ Fetched and stored ${recordsUpserted} records`);
+        } else {
+          console.log(`      - No new records for this chunk`);
+        }
+
+        processedChunks++;
+        
+        // Add delay between chunks to avoid rate limits (3 seconds between chunks)
+        if (chunkIdx < chunks.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
+      } catch (error: any) {
+        errors++;
+        if (error.message?.includes('402') || error.message?.includes('Payment Required')) {
+          apiLimitHit = true;
+          console.error(`\n      ✗ Dune API limit reached!`);
+          console.error(`\n   Processed ${processedChunks} chunks, fetched ${totalRecords} records before limit.`);
+          console.error(`\n   Options to continue:`);
+          console.error(`   1. Wait for your Dune billing cycle to reset`);
+          console.error(`   2. Upgrade your Dune subscription`);
+          console.error(`   3. Resume later - script will skip already-filled chunks`);
+          console.error(`\n   To resume, run the script again - it will skip chunks that already have data.\n`);
+          break;
+        } else {
+          console.error(`      ✗ Error: ${error.message}`);
+          // Continue with next chunk on non-limit errors
+        }
       }
-    } catch (error: any) {
-      console.error('✗ Backfill error:', error.message);
-      if (error.message?.includes('402') || error.message?.includes('Payment Required')) {
-        console.error('\n   Dune API limit reached!');
-        console.error('   Options to continue:');
-        console.error('   1. Wait for your Dune billing cycle to reset');
-        console.error('   2. Upgrade your Dune subscription');
-        console.error('   3. Resume later - script will skip already-filled records');
-      }
-      throw error;
+
+      if (apiLimitHit) break;
     }
 
-    // 7. Verify final state
-    console.log('\n6. Verifying final state...');
+    if (!apiLimitHit) {
+      console.log(`\n✓ Backfill completed successfully`);
+      console.log(`   Processed ${processedChunks}/${chunks.length} chunks`);
+      console.log(`   Total records fetched: ${totalRecords}`);
+    } else {
+      console.log(`\n⚠ Backfill partially completed`);
+      console.log(`   Processed ${processedChunks}/${chunks.length} chunks`);
+      console.log(`   Total records fetched: ${totalRecords}`);
+      console.log(`   Run the script again to continue from where it left off.`);
+    }
+
+    if (errors > 0 && !apiLimitHit) {
+      console.log(`\n⚠ Completed with ${errors} error(s) (non-fatal)`);
+    }
+
+    // 8. Verify final state
+    console.log('\n7. Verifying final state...');
     const finalCheck = await databaseService.pool.query(`
       SELECT 
         COUNT(*) as total_records,

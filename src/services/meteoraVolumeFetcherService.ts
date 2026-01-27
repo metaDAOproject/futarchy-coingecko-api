@@ -140,9 +140,10 @@ export class MeteoraVolumeFetcherService {
         ? this.addDays(lastCompleteDate, 1)
         : '2025-10-09';
       
-      const recordsUpserted = await this.fetchAndStore(startDate);
-      
+      // Constrain to today for daily fetches
       const today = new Date().toISOString().split('T')[0]!;
+      const recordsUpserted = await this.fetchAndStore(startDate, today);
+      
       await this.databaseService.markMeteoraDaysComplete(today);
 
       logger.info(`[MeteoraVolume] Refresh completed successfully - ${recordsUpserted} records`);
@@ -169,9 +170,10 @@ export class MeteoraVolumeFetcherService {
         ? this.addDays(lastCompleteDate, 1)
         : '2025-10-09';
       
-      const recordsUpserted = await this.fetchAndStore(startDate);
-      
+      // Constrain to today for force refresh
       const today = new Date().toISOString().split('T')[0]!;
+      const recordsUpserted = await this.fetchAndStore(startDate, today);
+      
       await this.databaseService.markMeteoraDaysComplete(today);
 
       this.initialized = true;
@@ -193,6 +195,7 @@ export class MeteoraVolumeFetcherService {
   private async backfillFromStart(): Promise<void> {
     logger.info('[MeteoraVolume] Starting full backfill from Dune...');
     try {
+      // For full backfill, don't constrain end date - fetch all available data
       const recordsUpserted = await this.fetchAndStore('2025-10-09');
       logger.info(`[MeteoraVolume] Backfill complete, upserted ${recordsUpserted} records`);
       
@@ -205,23 +208,40 @@ export class MeteoraVolumeFetcherService {
   }
 
   /**
+   * Public method to fetch data for a specific date range (for chunked backfills)
+   */
+  async fetchDateRange(startDate: string, endDate: string): Promise<number> {
+    return this.fetchAndStore(startDate, endDate);
+  }
+
+  /**
    * Fetch data from Dune and store in database
    */
-  private async fetchAndStore(startDate: string): Promise<number> {
+  private async fetchAndStore(startDate: string, endDate?: string): Promise<number> {
     if (!config.dune.meteoraVolumeQueryId) {
       throw new Error('No DUNE_METEORA_VOLUME_QUERY_ID configured');
     }
 
+    const params: Record<string, any> = {
+      start_date: startDate,
+    };
+    
+    // Only include end_date if it's explicitly provided
+    // If not provided, use sentinel value '9999-12-31' to indicate unconstrained query
+    if (endDate !== undefined) {
+      params.end_date = endDate;
+    } else {
+      params.end_date = '9999-12-31'; // Sentinel value means no constraint
+    }
+
     logger.info(`[MeteoraVolume] Fetching from Dune query ${config.dune.meteoraVolumeQueryId}`);
-    logger.info(`[MeteoraVolume] Parameters: start_date=${startDate}`);
+    logger.info(`[MeteoraVolume] Parameters: start_date=${startDate}, end_date=${endDate || '(unconstrained)'}`);
 
     let result;
     try {
       result = await (this.duneService as any).executeQueryManually(
         config.dune.meteoraVolumeQueryId,
-        {
-          start_date: startDate,
-        }
+        params
       );
     } catch (duneError: any) {
       logger.error('[MeteoraVolume] Dune query execution failed', duneError);

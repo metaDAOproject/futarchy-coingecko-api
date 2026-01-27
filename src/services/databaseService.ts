@@ -1539,57 +1539,107 @@ export class DatabaseService {
         logger.info('[Database] Backfilling hourly records from 10-minute data using aggregate_10min_to_hourly function...');
         
         for (const row of hoursToUpdate.rows) {
+          // Call the DB function for this specific hour
+          // PostgreSQL has issues with parameter type inference for function calls,
+          // so we construct the SQL with properly escaped values
+          // Declare outside try block so they're accessible in catch block
+          const tokenValue = String(row.token);
+          const hourValue = row.hour instanceof Date ? row.hour.toISOString() : String(row.hour);
+          
           try {
-            // Call the DB function for this specific hour
-            const aggregated = await this.pool.query(
-              `SELECT * FROM aggregate_10min_to_hourly($1, $2)`,
-              [row.token, row.hour]
-            );
-
-            if (aggregated.rows.length > 0) {
-              const agg = aggregated.rows[0];
+            
+            // Use pg's escapeLiteral for safe SQL construction
+            const client = await this.pool.connect();
+            try {
+              const escapedToken = client.escapeLiteral(tokenValue);
+              const escapedHour = client.escapeLiteral(hourValue);
               
-              // Only update if we have valid aggregated data (not all NULL)
-              if (agg.average_price != null || agg.usdc_fees != null || agg.sell_volume_usdc != null) {
-                // Update the hourly record with aggregated values, only updating fields that are 0 or NULL
-                await this.pool.query(
-                  `UPDATE hourly_volumes
-                  SET 
-                    buy_volume = CASE WHEN $1 IS NOT NULL THEN COALESCE(NULLIF(buy_volume, 0), $1) ELSE buy_volume END,
-                    sell_volume = CASE WHEN $2 IS NOT NULL THEN COALESCE(NULLIF(sell_volume, 0), $2) ELSE sell_volume END,
-                    average_price = CASE WHEN $3 IS NOT NULL THEN COALESCE(NULLIF(average_price, 0), $3) ELSE average_price END,
-                    usdc_fees = CASE WHEN $4 IS NOT NULL THEN COALESCE(NULLIF(usdc_fees, 0), $4) ELSE usdc_fees END,
-                    token_fees = CASE WHEN $5 IS NOT NULL THEN COALESCE(NULLIF(token_fees, 0), $5) ELSE token_fees END,
-                    token_fees_usdc = CASE WHEN $6 IS NOT NULL THEN COALESCE(NULLIF(token_fees_usdc, 0), $6) ELSE token_fees_usdc END,
-                    sell_volume_usdc = CASE WHEN $7 IS NOT NULL THEN COALESCE(NULLIF(sell_volume_usdc, 0), $7) ELSE sell_volume_usdc END,
-                    updated_at = CURRENT_TIMESTAMP
-                  WHERE token = $8 AND hour = $9
-                    AND (
-                      average_price IS NULL OR average_price = 0 OR
-                      usdc_fees IS NULL OR usdc_fees = 0 OR
-                      sell_volume_usdc IS NULL OR sell_volume_usdc = 0 OR
-                      buy_volume IS NULL OR buy_volume = 0 OR
-                      sell_volume IS NULL OR sell_volume = 0 OR
-                      token_fees IS NULL OR token_fees = 0 OR
-                      token_fees_usdc IS NULL OR token_fees_usdc = 0
-                    )`,
-                  [
-                    agg.buy_volume,
-                    agg.sell_volume,
-                    agg.average_price,
-                    agg.usdc_fees,
-                    agg.token_fees,
-                    agg.token_fees_usdc,
-                    agg.sell_volume_usdc,
-                    row.token,
-                    row.hour,
-                  ]
-                );
-                results.hourlyUpdated++;
+              const aggregated = await client.query(
+                `SELECT * FROM aggregate_10min_to_hourly(${escapedToken}::VARCHAR, ${escapedHour}::TIMESTAMPTZ)`
+              );
+              
+              if (aggregated.rows.length > 0) {
+                const agg = aggregated.rows[0];
+                
+                // Only update if we have valid aggregated data (not all NULL)
+                if (agg.average_price != null || agg.usdc_fees != null || agg.sell_volume_usdc != null) {
+                  // Convert all numeric values to proper types (null or number)
+                  // PostgreSQL can't determine parameter types when values are undefined
+                  const buyVolume = agg.buy_volume != null ? Number(agg.buy_volume) : null;
+                  const sellVolume = agg.sell_volume != null ? Number(agg.sell_volume) : null;
+                  const averagePrice = agg.average_price != null ? Number(agg.average_price) : null;
+                  const usdcFees = agg.usdc_fees != null ? Number(agg.usdc_fees) : null;
+                  const tokenFees = agg.token_fees != null ? Number(agg.token_fees) : null;
+                  const tokenFeesUsdc = agg.token_fees_usdc != null ? Number(agg.token_fees_usdc) : null;
+                  const sellVolumeUsdc = agg.sell_volume_usdc != null ? Number(agg.sell_volume_usdc) : null;
+                  
+                  // Log parameter values for debugging
+                  logger.debug(`[Database] Updating hour ${hourValue} for token ${tokenValue}`, {
+                    buyVolume,
+                    sellVolume,
+                    averagePrice,
+                    usdcFees,
+                    tokenFees,
+                    tokenFeesUsdc,
+                    sellVolumeUsdc,
+                    tokenValue,
+                    hourValue,
+                    rawAgg: agg
+                  });
+                  
+                  // Update the hourly record with aggregated values, only updating fields that are 0 or NULL
+                  await client.query(
+                    `UPDATE hourly_volumes
+                    SET 
+                      buy_volume = CASE WHEN $1::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(buy_volume, 0), $1::NUMERIC) ELSE buy_volume END,
+                      sell_volume = CASE WHEN $2::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(sell_volume, 0), $2::NUMERIC) ELSE sell_volume END,
+                      average_price = CASE WHEN $3::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(average_price, 0), $3::NUMERIC) ELSE average_price END,
+                      usdc_fees = CASE WHEN $4::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(usdc_fees, 0), $4::NUMERIC) ELSE usdc_fees END,
+                      token_fees = CASE WHEN $5::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(token_fees, 0), $5::NUMERIC) ELSE token_fees END,
+                      token_fees_usdc = CASE WHEN $6::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(token_fees_usdc, 0), $6::NUMERIC) ELSE token_fees_usdc END,
+                      sell_volume_usdc = CASE WHEN $7::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(sell_volume_usdc, 0), $7::NUMERIC) ELSE sell_volume_usdc END,
+                      updated_at = CURRENT_TIMESTAMP
+                    WHERE token = $8::VARCHAR AND hour = $9::TIMESTAMPTZ
+                      AND (
+                        average_price IS NULL OR average_price = 0 OR
+                        usdc_fees IS NULL OR usdc_fees = 0 OR
+                        sell_volume_usdc IS NULL OR sell_volume_usdc = 0 OR
+                        buy_volume IS NULL OR buy_volume = 0 OR
+                        sell_volume IS NULL OR sell_volume = 0 OR
+                        token_fees IS NULL OR token_fees = 0 OR
+                        token_fees_usdc IS NULL OR token_fees_usdc = 0
+                      )`,
+                    [
+                      buyVolume,
+                      sellVolume,
+                      averagePrice,
+                      usdcFees,
+                      tokenFees,
+                      tokenFeesUsdc,
+                      sellVolumeUsdc,
+                      tokenValue,
+                      hourValue,
+                    ]
+                  );
+                  results.hourlyUpdated++;
+                }
               }
+            } finally {
+              client.release();
             }
           } catch (error: any) {
-            logger.error(`[Database] Error updating hour ${row.hour} for token ${row.token}:`, error);
+            logger.error(`[Database] Error updating hour ${row.hour} for token ${row.token}:`, {
+              error: error.message,
+              stack: error.stack,
+              token: row.token,
+              hour: row.hour,
+              tokenValue,
+              hourValue,
+              tokenType: typeof row.token,
+              hourType: typeof row.hour,
+              hourIsDate: row.hour instanceof Date,
+              hourRawValue: row.hour,
+            });
           }
         }
         logger.info(`[Database] Updated ${results.hourlyUpdated} hourly records with missing fields`);
@@ -1627,67 +1677,127 @@ export class DatabaseService {
         logger.info('[Database] Backfilling daily records from hourly data using aggregate_hourly_to_daily function...');
         
         for (const row of daysToUpdate.rows) {
+          // Call the DB function for this specific day
+          // PostgreSQL has issues with parameter type inference for function calls,
+          // so we construct the SQL with properly escaped values
+          // Declare outside try block so they're accessible in catch block
+          const tokenValue = String(row.token);
+          const dateValue = row.date instanceof Date ? row.date.toISOString().split('T')[0] : String(row.date);
+          
           try {
-            // Call the DB function for this specific day
-            const aggregated = await this.pool.query(
-              `SELECT * FROM aggregate_hourly_to_daily($1, $2)`,
-              [row.token, row.date]
-            );
-
-            if (aggregated.rows.length > 0) {
-              const agg = aggregated.rows[0];
+            
+            // Use pg's escapeLiteral for safe SQL construction
+            const client = await this.pool.connect();
+            try {
+              const escapedToken = client.escapeLiteral(tokenValue);
+              const escapedDate = client.escapeLiteral(dateValue);
               
-              // Only update if we have valid aggregated data (not all NULL)
-              if (agg.average_price != null || agg.usdc_fees != null || agg.sell_volume_usdc != null) {
-                // Update the daily record with aggregated values, only updating fields that are 0 or NULL
-                await this.pool.query(
-                  `UPDATE daily_volumes
-                  SET 
-                    buy_volume = CASE WHEN $1 IS NOT NULL THEN COALESCE(NULLIF(buy_volume, 0), $1) ELSE buy_volume END,
-                    sell_volume = CASE WHEN $2 IS NOT NULL THEN COALESCE(NULLIF(sell_volume, 0), $2) ELSE sell_volume END,
-                    average_price = CASE WHEN $3 IS NOT NULL THEN COALESCE(NULLIF(average_price, 0), $3) ELSE average_price END,
-                    trade_count = CASE WHEN $4 IS NOT NULL THEN COALESCE(NULLIF(trade_count, 0), $4) ELSE trade_count END,
-                    usdc_fees = CASE WHEN $5 IS NOT NULL THEN COALESCE(NULLIF(usdc_fees, 0), $5) ELSE usdc_fees END,
-                    token_fees = CASE WHEN $6 IS NOT NULL THEN COALESCE(NULLIF(token_fees, 0), $6) ELSE token_fees END,
-                    token_fees_usdc = CASE WHEN $7 IS NOT NULL THEN COALESCE(NULLIF(token_fees_usdc, 0), $7) ELSE token_fees_usdc END,
-                    sell_volume_usdc = CASE WHEN $8 IS NOT NULL THEN COALESCE(NULLIF(sell_volume_usdc, 0), $8) ELSE sell_volume_usdc END,
-                    cumulative_usdc_fees = CASE WHEN $9 IS NOT NULL THEN COALESCE(NULLIF(cumulative_usdc_fees, 0), $9) ELSE cumulative_usdc_fees END,
-                    cumulative_token_in_usdc_fees = CASE WHEN $10 IS NOT NULL THEN COALESCE(NULLIF(cumulative_token_in_usdc_fees, 0), $10) ELSE cumulative_token_in_usdc_fees END,
-                    cumulative_target_volume = CASE WHEN $11 IS NOT NULL THEN COALESCE(NULLIF(cumulative_target_volume, 0), $11) ELSE cumulative_target_volume END,
-                    cumulative_token_volume = CASE WHEN $12 IS NOT NULL THEN COALESCE(NULLIF(cumulative_token_volume, 0), $12) ELSE cumulative_token_volume END,
-                    updated_at = CURRENT_TIMESTAMP
-                  WHERE token = $13 AND date = $14
-                    AND (
-                      average_price IS NULL OR average_price = 0 OR
-                      usdc_fees IS NULL OR usdc_fees = 0 OR
-                      sell_volume_usdc IS NULL OR sell_volume_usdc = 0 OR
-                      buy_volume IS NULL OR buy_volume = 0 OR
-                      sell_volume IS NULL OR sell_volume = 0 OR
-                      token_fees IS NULL OR token_fees = 0 OR
-                      token_fees_usdc IS NULL OR token_fees_usdc = 0
-                    )`,
-                  [
-                    agg.buy_volume,
-                    agg.sell_volume,
-                    agg.average_price,
-                    agg.trade_count,
-                    agg.usdc_fees,
-                    agg.token_fees,
-                    agg.token_fees_usdc,
-                    agg.sell_volume_usdc,
-                    agg.cumulative_usdc_fees,
-                    agg.cumulative_token_in_usdc_fees,
-                    agg.cumulative_target_volume,
-                    agg.cumulative_token_volume,
-                    row.token,
-                    row.date,
-                  ]
-                );
-                results.dailyUpdated++;
+              const aggregated = await client.query(
+                `SELECT * FROM aggregate_hourly_to_daily(${escapedToken}::VARCHAR, ${escapedDate}::DATE)`
+              );
+              
+              if (aggregated.rows.length > 0) {
+                const agg = aggregated.rows[0];
+                
+                // Only update if we have valid aggregated data (not all NULL)
+                if (agg.average_price != null || agg.usdc_fees != null || agg.sell_volume_usdc != null) {
+                  // Convert all numeric values to proper types (null or number)
+                  // PostgreSQL can't determine parameter types when values are undefined
+                  const buyVolume = agg.buy_volume != null ? Number(agg.buy_volume) : null;
+                  const sellVolume = agg.sell_volume != null ? Number(agg.sell_volume) : null;
+                  const averagePrice = agg.average_price != null ? Number(agg.average_price) : null;
+                  const tradeCount = agg.trade_count != null ? Number(agg.trade_count) : null;
+                  const usdcFees = agg.usdc_fees != null ? Number(agg.usdc_fees) : null;
+                  const tokenFees = agg.token_fees != null ? Number(agg.token_fees) : null;
+                  const tokenFeesUsdc = agg.token_fees_usdc != null ? Number(agg.token_fees_usdc) : null;
+                  const sellVolumeUsdc = agg.sell_volume_usdc != null ? Number(agg.sell_volume_usdc) : null;
+                  const cumulativeUsdcFees = agg.cumulative_usdc_fees != null ? Number(agg.cumulative_usdc_fees) : null;
+                  const cumulativeTokenInUsdcFees = agg.cumulative_token_in_usdc_fees != null ? Number(agg.cumulative_token_in_usdc_fees) : null;
+                  const cumulativeTargetVolume = agg.cumulative_target_volume != null ? Number(agg.cumulative_target_volume) : null;
+                  const cumulativeTokenVolume = agg.cumulative_token_volume != null ? Number(agg.cumulative_token_volume) : null;
+                  
+                  // Log parameter values for debugging
+                  logger.debug(`[Database] Updating day ${dateValue} for token ${tokenValue}`, {
+                    buyVolume,
+                    sellVolume,
+                    averagePrice,
+                    tradeCount,
+                    usdcFees,
+                    tokenFees,
+                    tokenFeesUsdc,
+                    sellVolumeUsdc,
+                    cumulativeUsdcFees,
+                    cumulativeTokenInUsdcFees,
+                    cumulativeTargetVolume,
+                    cumulativeTokenVolume,
+                    tokenValue,
+                    dateValue,
+                    rawAgg: agg
+                  });
+                  
+                  // Update the daily record with aggregated values, only updating fields that are 0 or NULL
+                  await client.query(
+                    `UPDATE daily_volumes
+                    SET 
+                      buy_volume = CASE WHEN $1::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(buy_volume, 0), $1::NUMERIC) ELSE buy_volume END,
+                      sell_volume = CASE WHEN $2::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(sell_volume, 0), $2::NUMERIC) ELSE sell_volume END,
+                      average_price = CASE WHEN $3::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(average_price, 0), $3::NUMERIC) ELSE average_price END,
+                      trade_count = CASE WHEN $4::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(trade_count, 0), $4::NUMERIC) ELSE trade_count END,
+                      usdc_fees = CASE WHEN $5::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(usdc_fees, 0), $5::NUMERIC) ELSE usdc_fees END,
+                      token_fees = CASE WHEN $6::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(token_fees, 0), $6::NUMERIC) ELSE token_fees END,
+                      token_fees_usdc = CASE WHEN $7::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(token_fees_usdc, 0), $7::NUMERIC) ELSE token_fees_usdc END,
+                      sell_volume_usdc = CASE WHEN $8::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(sell_volume_usdc, 0), $8::NUMERIC) ELSE sell_volume_usdc END,
+                      cumulative_usdc_fees = CASE WHEN $9::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(cumulative_usdc_fees, 0), $9::NUMERIC) ELSE cumulative_usdc_fees END,
+                      cumulative_token_in_usdc_fees = CASE WHEN $10::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(cumulative_token_in_usdc_fees, 0), $10::NUMERIC) ELSE cumulative_token_in_usdc_fees END,
+                      cumulative_target_volume = CASE WHEN $11::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(cumulative_target_volume, 0), $11::NUMERIC) ELSE cumulative_target_volume END,
+                      cumulative_token_volume = CASE WHEN $12::NUMERIC IS NOT NULL THEN COALESCE(NULLIF(cumulative_token_volume, 0), $12::NUMERIC) ELSE cumulative_token_volume END,
+                      updated_at = CURRENT_TIMESTAMP
+                    WHERE token = $13::VARCHAR AND date = $14::DATE
+                      AND (
+                        average_price IS NULL OR average_price = 0 OR
+                        usdc_fees IS NULL OR usdc_fees = 0 OR
+                        sell_volume_usdc IS NULL OR sell_volume_usdc = 0 OR
+                        buy_volume IS NULL OR buy_volume = 0 OR
+                        sell_volume IS NULL OR sell_volume = 0 OR
+                        token_fees IS NULL OR token_fees = 0 OR
+                        token_fees_usdc IS NULL OR token_fees_usdc = 0
+                      )`,
+                    [
+                      buyVolume,
+                      sellVolume,
+                      averagePrice,
+                      tradeCount,
+                      usdcFees,
+                      tokenFees,
+                      tokenFeesUsdc,
+                      sellVolumeUsdc,
+                      cumulativeUsdcFees,
+                      cumulativeTokenInUsdcFees,
+                      cumulativeTargetVolume,
+                      cumulativeTokenVolume,
+                      tokenValue,
+                      dateValue,
+                    ]
+                  );
+                  results.dailyUpdated++;
+                }
               }
+            } finally {
+              client.release();
             }
           } catch (error: any) {
-            logger.error(`[Database] Error updating day ${row.date} for token ${row.token}:`, error);
+            logger.error(`[Database] Error updating day ${row.date} for token ${row.token}:`, {
+              error: error.message,
+              stack: error.stack,
+              token: row.token,
+              date: row.date,
+              tokenValue,
+              dateValue,
+              tokenType: typeof row.token,
+              dateType: typeof row.date,
+              dateIsDate: row.date instanceof Date,
+              dateRawValue: row.date,
+            });
           }
         }
         logger.info(`[Database] Updated ${results.dailyUpdated} daily records with missing fields`);
@@ -1766,7 +1876,7 @@ export class DatabaseService {
 
     try {
       const result = await this.pool.query(
-        `SELECT * FROM aggregate_10min_to_hourly($1, $2)`,
+        `SELECT * FROM aggregate_10min_to_hourly(CAST($1 AS VARCHAR), CAST($2 AS TIMESTAMPTZ))`,
         [token || null, hour || null]
       );
 
@@ -1851,7 +1961,7 @@ export class DatabaseService {
 
     try {
       const result = await this.pool.query(
-        `SELECT * FROM aggregate_hourly_to_daily($1, $2)`,
+        `SELECT * FROM aggregate_hourly_to_daily(CAST($1 AS VARCHAR), CAST($2 AS DATE))`,
         [token || null, date || null]
       );
 
@@ -2247,6 +2357,92 @@ export class DatabaseService {
   }
 
   /**
+   * Get daily Meteora volumes with date range filtering
+   * @param options.token Filter by specific token
+   * @param options.tokens Filter by array of tokens
+   * @param options.startDate Start date (inclusive) in YYYY-MM-DD format
+   * @param options.endDate End date (inclusive) in YYYY-MM-DD format
+   */
+  async getDailyMeteoraVolumes(options?: {
+    token?: string;
+    tokens?: string[];
+    startDate?: string;
+    endDate?: string;
+  }): Promise<{
+    token: string;
+    date: string;
+    base_volume: string;
+    target_volume: string;
+    buy_volume: string;
+    sell_volume: string;
+    trade_count: number;
+    average_price: string;
+    usdc_fees: string;
+    token_fees: string;
+    token_fees_usdc: string;
+    token_per_usdc: string;
+  }[]> {
+    if (!this.pool || !this.isConnected) return [];
+
+    try {
+      const conditions: string[] = [];
+      const params: any[] = [];
+      let paramIndex = 1;
+
+      // Support both single token and array of tokens
+      if (options?.tokens && options.tokens.length > 0) {
+        const placeholders = options.tokens.map((_, i) => `LOWER($${paramIndex + i})`).join(', ');
+        conditions.push(`LOWER(token) IN (${placeholders})`);
+        params.push(...options.tokens);
+        paramIndex += options.tokens.length;
+      } else if (options?.token) {
+        conditions.push(`LOWER(token) = LOWER($${paramIndex})`);
+        params.push(options.token);
+        paramIndex++;
+      }
+
+      if (options?.startDate) {
+        conditions.push(`date >= $${paramIndex}`);
+        params.push(options.startDate);
+        paramIndex++;
+      }
+
+      if (options?.endDate) {
+        conditions.push(`date <= $${paramIndex}`);
+        params.push(options.endDate);
+        paramIndex++;
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const result = await this.pool.query(
+        `SELECT 
+          token,
+          date::text,
+          base_volume::text,
+          target_volume::text,
+          buy_volume::text,
+          sell_volume::text,
+          trade_count,
+          average_price::text,
+          usdc_fees::text,
+          token_fees::text,
+          token_fees_usdc::text,
+          token_per_usdc::text
+         FROM daily_meteora_volumes
+         ${whereClause}
+         ORDER BY token, date ASC`,
+        params
+      );
+
+      return result.rows;
+    } catch (error: any) {
+      logger.error('[Database] Error getting daily Meteora volumes:', error);
+      return [];
+    }
+  }
+
+  /**
    * Get aggregated buy/sell stats for all tokens
    */
   async getBuySellAggregates(tokens?: string[]): Promise<Map<string, {
@@ -2634,9 +2830,9 @@ export class DatabaseService {
           const valuePlaceholders: string[] = [];
           
           batch.forEach((record, idx) => {
-            const offset = idx * 13; // 13 parameters per record
+            const offset = idx * 15; // 15 parameters per record (14 data fields + is_complete)
             valuePlaceholders.push(
-              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, ${markComplete}, CURRENT_TIMESTAMP)`
+              `($${offset + 1}, $${offset + 2}, $${offset + 3}, $${offset + 4}, $${offset + 5}, $${offset + 6}, $${offset + 7}, $${offset + 8}, $${offset + 9}, $${offset + 10}, $${offset + 11}, $${offset + 12}, $${offset + 13}, $${offset + 14}, $${offset + 15}, CURRENT_TIMESTAMP)`
             );
             values.push(
               record.token,
@@ -2652,7 +2848,8 @@ export class DatabaseService {
               record.token_per_usdc,
               record.average_price,
               record.ownership_share,
-              record.earned_fee_usdc
+              record.earned_fee_usdc,
+              markComplete ? true : (record.is_complete ?? false)
             );
           });
 

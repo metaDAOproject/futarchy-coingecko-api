@@ -35,11 +35,16 @@ export function createMarketRouter(services: ServiceGetters): Router {
     }
 
     try {
-      const data = await databaseService.getDailyBuySellVolumes({
+      const queryOptions = {
         tokens: tokensResult.value,
         startDate: startDateResult.value!,
         endDate: endDateResult.value!,
-      });
+      };
+
+      const [futarchyData, meteoraData] = await Promise.all([
+        databaseService.getDailyBuySellVolumes(queryOptions),
+        databaseService.getDailyMeteoraVolumes(queryOptions),
+      ]);
       
       res.json({
         filters: {
@@ -47,8 +52,14 @@ export function createMarketRouter(services: ServiceGetters): Router {
           startDate: startDateResult.value,
           endDate: endDateResult.value,
         },
-        count: data.length,
-        data,
+        futarchyAMM: {
+          count: futarchyData.length,
+          data: futarchyData,
+        },
+        meteora: {
+          count: meteoraData.length,
+          data: meteoraData,
+        },
       });
     } catch (error: any) {
       res.status(500).json({

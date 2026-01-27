@@ -17,19 +17,19 @@
  */
 export const METEORA_OWNER_TO_TOKEN_MAP: Map<string, string> = new Map([
   // Umbra
-  ['6VsC8PuKkXm5xo54c2vbrAaSfQipkpGHqNuKTxXFySx6', ''], // TODO: Add Umbra baseMint
+  ['6vsc8pukkxm5xo54c2vbraasfqipkpghqnuktxxfysx6', 'PRVT6TB7uss3FrUd2D9xs2zqDBsa3GbMJMwCQsgmeta'], // TODO: Add Umbra baseMint
   // Ranger
-  ['55H1Q1YrHJQ93uhG4jqrBBHx3a8H7TCM8kvf2UM2g5q3', ''], // TODO: Add Ranger baseMint
+  ['55h1q1yrhjq93uhg4jqrbbhx3a8h7tcm8kvf2um2g5q3', 'RNGRtJMbCveqCp7AC6U95KmrdKecFckaJZiWbPGmeta'], // TODO: Add Ranger baseMint
   // Paystream
-  ['BpXtB2ASf2Tft97ewTd8PayXCqFQ6Wqod33qrwwfK9Vz', ''], // TODO: Add Paystream baseMint
+  ['bpxtb2asf2tft97ewtd8payxcqfq6wqod33qrwwfk9vz', 'PAYZP1W3UmdEsNLJwmH61TNqACYJTvhXy8SCN4Tmeta'], // TODO: Add Paystream baseMint
   // Loyal
-  ['AQyyTwCKemeeMu8ZPZFxrXMbVwAYTSbBhi1w4PBrhvYE', ''], // TODO: Add Loyal baseMint
+  ['aqyytwckemeemu8zpzfxrxmbvwaytsbbhi1w4pbrhvye', 'LYLikzBQtpa9ZgVrJsqYGQpR3cC1WMJrBHaXGrQmeta'], // TODO: Add Loyal baseMint
   // Avici
-  ['DGgYoUcu1aDZt4GEL5NQiducwHRGbkMWsUzsXh2j622G', ''], // TODO: Add Avici baseMint
+  ['dggyoucu1adzt4gel5nqiducwhrgbkmwsuzsxh2j622g', 'BANKJmvhT8tiJRsBSS1n2HryMBPvT5Ze4HU95DUAmeta'], // TODO: Add Avici baseMint
   // ZKFG
-  ['BNvDfXYG2FAyBDYD71Xr9GhKE18MbmhtjsLKsCuXho6z', ''], // TODO: Add ZKFG baseMint
+  ['bnvdfxyg2faybdyd71xr9ghke18mbmhtjslkscuxho6z', 'ZKFHiLAfAFMTcDAuCtjNW54VzpERvoe7PBF9mYgmeta'], // TODO: Add ZKFG baseMint
   // Solomon
-  ['98SPcyUZ2rqM2dgjCqqSXS4gJrNTLSNUAAVCF38xYj9u', ''], // TODO: Add Solomon baseMint
+  ['98spcyuz2rqm2dgjcqqsxs4gjrntlsnuaavcf38xyj9u', 'SoLo9oxzLDpcq1dpqAgMwgce5WqkRDtNXK7EPnbmeta'], // TODO: Add Solomon baseMint
 ]);
 
 /**

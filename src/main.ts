@@ -107,6 +107,17 @@ async function startServices(services: Services): Promise<void> {
       logger.error('Failed to start Dune cache service', error);
     }
   }
+
+  if (services.meteoraVolumeFetcherService) {
+    logger.info('Starting Meteora Volume Fetcher service');
+    try {
+      await services.meteoraVolumeFetcherService.initialize();
+      services.meteoraVolumeFetcherService.start();
+      logger.info('Meteora Volume Fetcher service started');
+    } catch (error) {
+      logger.error('Failed to start Meteora Volume Fetcher service', error);
+    }
+  }
 }
 
 async function stopServices(services: Services, scheduledTasks: ScheduledTask[]): Promise<void> {

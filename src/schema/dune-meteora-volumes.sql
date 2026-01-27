@@ -1,13 +1,20 @@
 -- Dune Query: Meteora Daily Volumes per Owner
 -- Parameters:
 --   start_date: DATE - fetch data from this date onwards (default: '2025-10-09')
+--   end_date: DATE (optional) - fetch data up to this date (inclusive). If not provided, fetches all data from start_date onwards.
 --
 -- Returns daily aggregated data per owner with all required fields
 -- Cumulative fields are calculated in PostgreSQL, not here
 
 WITH
 params AS (
-  SELECT TIMESTAMP '{{start_date}}' AS start_ts
+  SELECT 
+    TIMESTAMP '{{start_date}}' AS start_ts,
+    CASE 
+      WHEN '{{end_date}}' = '9999-12-31' -- Sentinel value means no constraint
+      THEN TIMESTAMP '9999-12-31' -- No end date constraint if not provided
+      ELSE (CAST('{{end_date}}' AS TIMESTAMP) + INTERVAL '1' DAY) -- Make end_date inclusive by adding 1 day
+    END AS end_ts
 ),
 
 target_pools AS (
@@ -72,6 +79,7 @@ initial_liquidity AS (
   JOIN pool_map m
     ON m.pool = e.pool
   WHERE e.evt_block_time >= (SELECT start_ts FROM params)
+    AND e.evt_block_time < (SELECT end_ts FROM params)
 ),
 
 /* -----------------------------
@@ -91,6 +99,7 @@ add_liquidity AS (
     ) AS liquidity_delta
   FROM meteora_solana.cp_amm_call_add_liquidity
   WHERE call_block_time >= (SELECT start_ts FROM params)
+    AND call_block_time < (SELECT end_ts FROM params)
     AND account_pool IN (SELECT pool FROM target_pools)
 ),
 
@@ -108,6 +117,7 @@ remove_liquidity AS (
     ) AS liquidity_delta
   FROM meteora_solana.cp_amm_call_remove_liquidity
   WHERE call_block_time >= (SELECT start_ts FROM params)
+    AND call_block_time < (SELECT end_ts FROM params)
     AND account_pool IN (SELECT pool FROM target_pools)
 ),
 
@@ -183,6 +193,7 @@ swaps_union AS (
     CASE WHEN trade_direction = 1 THEN CAST(JSON_EXTRACT_SCALAR(swap_result, '$.SwapResult.lp_fee') AS DOUBLE) END AS lp_fee_token_raw
   FROM meteora_solana.cp_amm_evt_evtswap
   WHERE evt_block_time >= (SELECT start_ts FROM params)
+    AND evt_block_time < (SELECT end_ts FROM params)
     AND pool IN (SELECT pool FROM target_pools)
 
   UNION ALL
@@ -199,6 +210,7 @@ swaps_union AS (
     CASE WHEN trade_direction = 1 THEN CAST(JSON_EXTRACT_SCALAR(swap_result, '$.SwapResult2.trading_fee') AS DOUBLE) END AS lp_fee_token_raw
   FROM meteora_solana.cp_amm_evt_evtswap2
   WHERE evt_block_time >= (SELECT start_ts FROM params)
+    AND evt_block_time < (SELECT end_ts FROM params)
     AND pool IN (SELECT pool FROM target_pools)
 ),
 
@@ -242,8 +254,8 @@ daily_fees AS (
 
     -- Buy volume: sum of USDC in for trade_direction=0 (buy)
     SUM(CASE WHEN trade_direction = 0 THEN COALESCE(usdc_in_raw, 0) ELSE 0 END) / 1e6 AS buy_volume,
-    -- Sell volume: sum of token in for trade_direction=1 (sell)
-    SUM(CASE WHEN trade_direction = 1 THEN COALESCE(token_in_raw, 0) ELSE 0 END) / 1e6 AS sell_volume
+    -- Sell volume: sum of USDC out for trade_direction=1 (sell) - USDC received when selling tokens
+    SUM(CASE WHEN trade_direction = 1 THEN COALESCE(usdc_out_raw, 0) ELSE 0 END) / 1e6 AS sell_volume
   FROM swaps_union
   GROUP BY 1,2
 ),
@@ -251,6 +263,8 @@ daily_fees AS (
 /* -----------------------------
    AS-OF OWNERSHIP: last known share <= fee day
    This fixes "no results" when swaps happen on days without LP events.
+   Gets the most recent ownership share for each owner/position on or before each fee day.
+   Ensures all pools from pool_map are included with their owners.
    ----------------------------- */
 ownership_shares_asof AS (
   SELECT day, pool, owner, position, ownership_share
@@ -258,18 +272,21 @@ ownership_shares_asof AS (
     SELECT
       f.day,
       f.pool,
-      o.owner,
-      o.position,
-      o.ownership_share,
+      m.owner,
+      m.position,
+      COALESCE(o.ownership_share, 0) AS ownership_share,
       ROW_NUMBER() OVER (
-        PARTITION BY f.day, f.pool, o.owner, o.position
-        ORDER BY o.day DESC
+        PARTITION BY f.day, f.pool, m.owner
+        ORDER BY o.day DESC NULLS LAST
       ) AS rn
     FROM daily_fees f
-    JOIN ownership_shares_daily o
+    CROSS JOIN pool_map m
+    LEFT JOIN ownership_shares_daily o
       ON o.pool = f.pool
+     AND o.owner = m.owner
      AND o.day <= f.day
-    WHERE o.owner IN (SELECT owner FROM target_owners)
+     AND o.ownership_share > 0
+    WHERE f.pool = m.pool
   ) x
   WHERE rn = 1
 ),
@@ -286,12 +303,12 @@ fees_earned AS (
     f.lp_fee_usdc,
     f.lp_fee_token,
     f.token_per_usdc_raw,
-    f.token_price_usdc,
+    f.token_price_usdc AS avg_price_usdc,
     f.lp_fee_token_usdc,
     f.lp_fee_total_usdc,
     f.buy_volume,
     f.sell_volume,
-    f.lp_fee_total_usdc * o.ownership_share AS earned_fee_usdc
+    f.lp_fee_total_usdc * COALESCE(o.ownership_share, 0) AS earned_fee_usdc
   FROM daily_fees f
   JOIN ownership_shares_asof o
     ON f.day = o.day AND f.pool = o.pool
@@ -300,17 +317,16 @@ fees_earned AS (
 SELECT
   CAST(day AS DATE) AS day,
   owner,
+  pool,
   num_swaps,
+  buy_volume,
+  sell_volume,
   volume_usd_approx,
   lp_fee_usdc,
   lp_fee_token,
-  token_per_usdc_raw,
-  token_price_usdc,
   lp_fee_token_usdc,
-  lp_fee_total_usdc,
-  ownership_share,
-  earned_fee_usdc,
-  buy_volume,
-  sell_volume
+  token_per_usdc_raw,
+  avg_price_usdc AS token_price_usdc,
+  earned_fee_usdc
 FROM fees_earned
-ORDER BY day, owner;
+ORDER BY day, pool, owner;
