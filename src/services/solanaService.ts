@@ -41,6 +41,11 @@ export interface TokenSupplyInfo {
       amount: string;
       claimed: boolean;
     };
+    // DAO treasury tokens - base tokens held in the squads vault (not circulating)
+    daoTreasuryTokens?: {
+      amount: string;
+      vaultAddress?: string;
+    };
     // DAO address
     daoAddress?: string;
     // Launch address
@@ -70,6 +75,11 @@ export interface TokenAllocationInput {
     recipient: string;
     claimed: boolean;
     tokenAccountAddress?: string;
+  };
+  // DAO treasury tokens - base tokens held in the squads vault
+  daoTreasuryTokens?: {
+    amount: BN;
+    vaultAddress?: string;
   };
   daoAddress?: string;
   launchAddress?: string;
@@ -197,8 +207,9 @@ export class SolanaService {
    */
   async getSupplyInfo(mintAddress: string, allocation?: TokenAllocationInput): Promise<TokenSupplyInfo> {
     const additionalAmount = allocation?.additionalTokenAllocation?.amount || new BN(0);
+    const daoTreasuryAmount = allocation?.daoTreasuryTokens?.amount || new BN(0);
     const cacheKey = allocation 
-      ? `supply_info_${mintAddress}_${allocation.teamPerformancePackage.amount}_${allocation.futarchyAmmLiquidity.amount}_${allocation.meteoraLpLiquidity.amount}_${additionalAmount}`
+      ? `supply_info_${mintAddress}_${allocation.teamPerformancePackage.amount}_${allocation.futarchyAmmLiquidity.amount}_${allocation.meteoraLpLiquidity.amount}_${additionalAmount}_${daoTreasuryAmount}`
       : `supply_info_${mintAddress}_none`;
     const cached = this.getCached<TokenSupplyInfo>(cacheKey, config.cache.tickersTTL);
     if (cached !== null) return cached;
@@ -232,6 +243,12 @@ export class SolanaService {
         if (allocation.additionalTokenAllocation && 
             allocation.additionalTokenAllocation.amount.gt(new BN(0))) {
           circulatingSupplyBN = circulatingSupplyBN.sub(allocation.additionalTokenAllocation.amount);
+        }
+
+        // Subtract DAO treasury tokens (held in squads vault, protocol-controlled)
+        if (allocation.daoTreasuryTokens && 
+            allocation.daoTreasuryTokens.amount.gt(new BN(0))) {
+          circulatingSupplyBN = circulatingSupplyBN.sub(allocation.daoTreasuryTokens.amount);
         }
 
         // Special case: RNGR token has an initial token allocation that IS in circulation
@@ -277,6 +294,11 @@ export class SolanaService {
           } : undefined,
           // Include initial token allocation if present (special cases)
           initialTokenAllocation: initialTokenAllocationDetails,
+          // Include DAO treasury tokens if present
+          daoTreasuryTokens: allocation.daoTreasuryTokens && allocation.daoTreasuryTokens.amount.gt(new BN(0)) ? {
+            amount: (Number(allocation.daoTreasuryTokens.amount.toString()) / divisor).toString(),
+            vaultAddress: allocation.daoTreasuryTokens.vaultAddress,
+          } : undefined,
           daoAddress: allocation.daoAddress,
           launchAddress: allocation.launchAddress,
           version: allocation.version,

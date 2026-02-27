@@ -55,11 +55,16 @@ export interface TokenAllocationBreakdown {
   };
   // Additional token recipient (v0.7+ only) - not in circulating supply
   additionalTokenAllocation?: AdditionalTokenAllocation;
+  // DAO treasury tokens - base tokens held in the DAO's squads vault (not circulating)
+  daoTreasuryTokens: {
+    amount: BN;
+    vaultAddress?: PublicKey;
+  };
   // DAO address (if launch completed)
   daoAddress?: PublicKey;
   // Launch address
   launchAddress?: PublicKey;
-  // Total non-circulating supply (performance package + additional tokens if unclaimed)
+  // Total non-circulating supply (performance package + additional tokens if unclaimed + DAO treasury)
   totalNonCirculating: BN;
 }
 
@@ -567,6 +572,7 @@ export class LaunchpadService {
       teamPerformancePackage: { amount: new BN(0) },
       futarchyAmmLiquidity: { amount: new BN(0) },
       meteoraLpLiquidity: { amount: new BN(0) },
+      daoTreasuryTokens: { amount: new BN(0) },
       totalNonCirculating: new BN(0),
     };
 
@@ -628,6 +634,23 @@ export class LaunchpadService {
         };
       }
 
+      // Get DAO treasury base token balance (tokens held by the squads vault)
+      let daoTreasuryTokens: { amount: BN; vaultAddress?: PublicKey } = { amount: new BN(0) };
+      if (dao && (dao as any).squadsMultisigVault) {
+        try {
+          const vaultAddress = new PublicKey((dao as any).squadsMultisigVault);
+          const vaultAta = await getAssociatedTokenAddress(baseMint, vaultAddress, true);
+          const tokenAccount = await getAccount(this.connection, vaultAta);
+          daoTreasuryTokens = {
+            amount: new BN(tokenAccount.amount.toString()),
+            vaultAddress,
+          };
+          logger.info(`[Launchpad] DAO treasury holds ${daoTreasuryTokens.amount.toString()} base tokens in vault ${vaultAddress.toString()}`);
+        } catch (error: any) {
+          logger.info(`[Launchpad] No base token account in DAO treasury vault: ${error.message}`);
+        }
+      }
+
       // Calculate total non-circulating supply
       let totalNonCirculating = launch.performancePackageTokenAmount;
       
@@ -635,6 +658,9 @@ export class LaunchpadService {
       if (additionalTokenAllocation && !additionalTokenAllocation.claimed) {
         totalNonCirculating = totalNonCirculating.add(additionalTokenAllocation.amount);
       }
+
+      // Add DAO treasury tokens (protocol-controlled, not circulating)
+      totalNonCirculating = totalNonCirculating.add(daoTreasuryTokens.amount);
 
       const breakdown: TokenAllocationBreakdown = {
         version: launch.version,
@@ -652,6 +678,7 @@ export class LaunchpadService {
           vaultAddress: meteoraLp.vaultAddress,
         },
         additionalTokenAllocation,
+        daoTreasuryTokens,
         daoAddress: launch.dao,
         launchAddress: launch.launchAddress,
         totalNonCirculating,

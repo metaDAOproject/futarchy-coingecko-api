@@ -44,6 +44,10 @@ export function createSupplyRouter(services: ServiceGetters): Router {
           claimed: allocation.additionalTokenAllocation.claimed,
           tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress?.toString(),
         } : undefined,
+        daoTreasuryTokens: {
+          amount: allocation.daoTreasuryTokens.amount,
+          vaultAddress: allocation.daoTreasuryTokens.vaultAddress?.toString(),
+        },
         daoAddress: allocation.daoAddress?.toString(),
         launchAddress: allocation.launchAddress?.toString(),
         version: allocation.version,
@@ -105,6 +109,10 @@ export function createSupplyRouter(services: ServiceGetters): Router {
         claimed: allocation.additionalTokenAllocation.claimed,
         tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress?.toString(),
       } : undefined,
+      daoTreasuryTokens: {
+        amount: allocation.daoTreasuryTokens.amount,
+        vaultAddress: allocation.daoTreasuryTokens.vaultAddress?.toString(),
+      },
       daoAddress: allocation.daoAddress?.toString(),
       launchAddress: allocation.launchAddress?.toString(),
       version: allocation.version,
@@ -126,6 +134,10 @@ export function createSupplyRouter(services: ServiceGetters): Router {
           amount: string;
           claimed: boolean;
         };
+        daoTreasuryTokens?: {
+          amount: string;
+          vaultAddress?: string;
+        };
         daoAddress?: string;
         launchAddress?: string;
         version?: string;
@@ -137,7 +149,8 @@ export function createSupplyRouter(services: ServiceGetters): Router {
     if (allocation.teamPerformancePackage.address || 
         allocation.futarchyAmmLiquidity.vaultAddress || 
         allocation.meteoraLpLiquidity.poolAddress ||
-        allocation.additionalTokenAllocation) {
+        allocation.additionalTokenAllocation ||
+        !allocation.daoTreasuryTokens.amount.isZero()) {
       response.allocation = {
         teamPerformancePackageAddress: allocation.teamPerformancePackage.address?.toString(),
         futarchyAmmVaultAddress: allocation.futarchyAmmLiquidity.vaultAddress?.toString(),
@@ -145,6 +158,7 @@ export function createSupplyRouter(services: ServiceGetters): Router {
         meteoraVaultAddress: allocation.meteoraLpLiquidity.vaultAddress?.toString(),
         additionalTokenAllocation: supplyInfo.allocation?.additionalTokenAllocation,
         initialTokenAllocation: supplyInfo.allocation?.initialTokenAllocation,
+        daoTreasuryTokens: supplyInfo.allocation?.daoTreasuryTokens,
         daoAddress: allocation.daoAddress?.toString(),
         launchAddress: allocation.launchAddress?.toString(),
         version: allocation.version,
@@ -189,6 +203,10 @@ export function createSupplyRouter(services: ServiceGetters): Router {
         claimed: allocation.additionalTokenAllocation.claimed,
         tokenAccountAddress: allocation.additionalTokenAllocation.tokenAccountAddress?.toString(),
       } : undefined,
+      daoTreasuryTokens: {
+        amount: allocation.daoTreasuryTokens.amount,
+        vaultAddress: allocation.daoTreasuryTokens.vaultAddress?.toString(),
+      },
       daoAddress: allocation.daoAddress?.toString(),
       launchAddress: allocation.launchAddress?.toString(),
       version: allocation.version,
