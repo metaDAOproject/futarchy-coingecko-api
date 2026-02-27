@@ -596,11 +596,29 @@ export class LaunchpadService {
       const dao = await this.futarchyClient.fetchDao(launch.dao);
       const quoteMint = dao?.quoteMint;
 
-      // Derive the performance package address based on version
+      // Derive the performance package address and fetch its actual on-chain token balance
+      // We use the live balance rather than launch.performancePackageTokenAmount because
+      // tokens may have been unlocked/claimed (e.g. ZKFG, Loyal), making the configured
+      // amount stale and over-subtracting from circulating supply.
       const performancePackageAddress = this.getPerformancePackageAddress(
         launch.launchAddress, 
         launch.version
       );
+
+      let performancePackageLockedAmount = new BN(0);
+      try {
+        const ppAta = await getAssociatedTokenAddress(
+          baseMint,
+          performancePackageAddress,
+          true
+        );
+        const ppTokenAccount = await getAccount(this.connection, ppAta);
+        performancePackageLockedAmount = new BN(ppTokenAccount.amount.toString());
+        logger.info(`[Launchpad] Performance package at ${performancePackageAddress.toString()} holds ${performancePackageLockedAmount.toString()} tokens (configured: ${launch.performancePackageTokenAmount.toString()})`);
+      } catch (error: any) {
+        // Token account doesn't exist or is empty — all tokens unlocked/claimed
+        logger.info(`[Launchpad] Performance package token account not found for ${performancePackageAddress.toString()}, assuming 0 locked: ${error.message}`);
+      }
 
       // Get FutarchyAMM liquidity
       const futarchyAmm = await this.getFutarchyAmmLiquidity(launch.dao);
@@ -651,8 +669,8 @@ export class LaunchpadService {
         }
       }
 
-      // Calculate total non-circulating supply
-      let totalNonCirculating = launch.performancePackageTokenAmount;
+      // Calculate total non-circulating supply using live on-chain balance
+      let totalNonCirculating = performancePackageLockedAmount;
       
       // Add additional tokens if not yet claimed (they're still locked)
       if (additionalTokenAllocation && !additionalTokenAllocation.claimed) {
@@ -665,7 +683,7 @@ export class LaunchpadService {
       const breakdown: TokenAllocationBreakdown = {
         version: launch.version,
         teamPerformancePackage: {
-          amount: launch.performancePackageTokenAmount,
+          amount: performancePackageLockedAmount,
           address: performancePackageAddress,
         },
         futarchyAmmLiquidity: {
