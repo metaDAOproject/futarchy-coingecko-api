@@ -3,8 +3,8 @@ export const config = {
   // Development mode - disables external Dune API calls
   devMode: process.env.DEV_MODE === 'true',
   solana: {
-    rpcUrl: process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
-    wsUrl: process.env.SOLANA_WS_URL || 'wss://api.mainnet-beta.solana.com',
+    rpcUrl: process.env.RPCPOOL_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
+    wsUrl: process.env.RPCPOOL_WS_URL || process.env.SOLANA_WS_URL || 'wss://api.mainnet-beta.solana.com',
   },
   server: {
     port: parseInt(process.env.PORT || '3000'),
