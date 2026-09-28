@@ -15,8 +15,6 @@ import { getSupplyInfoWithLaunchpadAllocation } from '../services/supplyWithLaun
 
 const DEX_KEY = 'futarchyAMM';
 const FEE_BPS = Math.round(config.fees.protocolFeeRate * 10000); // 0.005 → 50
-const TOKEN_DECIMALS = 6; // All futarchy tokens + USDC use 6 decimals
-const DECIMALIZE = Math.pow(10, TOKEN_DECIMALS);
 
 export function createDexScreenerRouter(services: ServiceGetters): Router {
   const router = Router();
@@ -246,6 +244,8 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
          extract(epoch FROM u.block_time)::bigint                       AS unix_timestamp,
          u.dao_addr,
          u.user_addr,
+         u.base_mint,
+         u.quote_mint,
          u.side                                                         AS swap_type,
          CASE WHEN u.side = 'buy' THEN u.quote_amount ELSE u.base_amount  END AS input_amount,
          CASE WHEN u.side = 'buy' THEN u.base_amount  ELSE u.quote_amount END AS output_amount,
@@ -266,6 +266,20 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
     let txnIndex = -1;
     let eventIndex = 0;
 
+    // Reuse the service's on-chain decimals cache, and resolve each mint only
+    // once in this response. Failed lookups must fail the request, never default
+    // to six decimals and silently misprice a token.
+    const divisors = new Map<string, Promise<number>>();
+    function getDivisor(mint: string): Promise<number> {
+      let divisor = divisors.get(mint);
+      if (!divisor) {
+        divisor = getFutarchyService().getTokenDecimals(new PublicKey(mint))
+          .then(decimals => 10 ** decimals);
+        divisors.set(mint, divisor);
+      }
+      return divisor;
+    }
+
     for (const row of result.rows) {
       const slot = Number(row.slot);
       const sig = row.signature;
@@ -285,13 +299,17 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
       }
 
       const swapType = row.swap_type.trim().toLowerCase();
-      const inputAmount = Number(row.input_amount) / DECIMALIZE;
-      const outputAmount = Number(row.output_amount) / DECIMALIZE;
+      const [baseDivisor, quoteDivisor] = await Promise.all([
+        getDivisor(row.base_mint),
+        getDivisor(row.quote_mint),
+      ]);
+      const inputAmount = Number(row.input_amount) / (swapType === 'buy' ? quoteDivisor : baseDivisor);
+      const outputAmount = Number(row.output_amount) / (swapType === 'buy' ? baseDivisor : quoteDivisor);
 
       // Post-swap reserves from the DB (may be null for older rows)
       const hasReserves = row.amm_base_amount != null && row.amm_quote_amount != null;
       const reserves = hasReserves
-        ? { asset0: Number(row.amm_base_amount) / DECIMALIZE, asset1: Number(row.amm_quote_amount) / DECIMALIZE }
+        ? { asset0: Number(row.amm_base_amount) / baseDivisor, asset1: Number(row.amm_quote_amount) / quoteDivisor }
         : undefined;
 
       let priceNative: number;
