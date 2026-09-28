@@ -262,7 +262,8 @@ Returns swap events in the given Solana slot range (both inclusive). Events are 
 - **Buy** (user sends USDC → receives token): `asset1In` + `asset0Out`
 - **Sell** (user sends token → receives USDC): `asset0In` + `asset1Out`
 - `priceNative` = price of asset0 (base token) in asset1 (USDC)
-- All amounts are decimalized (divided by `10^6`)
+- Swap amounts and reserves are divided by `10^decimals` for their respective base or quote mint; tokens are not assumed to share six decimals. `priceNative` is quote tokens per base token after normalization.
+- Mint decimals use cached on-chain metadata, resolved once per distinct mint per request in batches of at most eight lookups. If metadata cannot be loaded, the events request returns 5xx instead of defaulting to a decimal count or returning partial data.
 
 ---
 
