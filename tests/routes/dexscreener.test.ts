@@ -185,6 +185,35 @@ describe('DexScreener Routes', () => {
       expect(calls.sort()).toEqual([BASE_MINT, QUOTE_MINT].sort());
     });
 
+    it('overlaps cold mint lookups without exceeding eight concurrent reads', async () => {
+      let active = 0;
+      let peak = 0;
+      const calls: string[] = [];
+      const rows = Array.from({ length: 12 }, (_, i) => ({
+        ...sanctumBuy, base_mint: new PublicKey(new Uint8Array(32).fill(i + 3)).toBase58(),
+      }));
+      const app = createTestApp({
+        externalDatabaseService: extDbReturning(rows),
+        futarchyService: {
+          getTokenDecimals: async (mint: PublicKey) => {
+            calls.push(mint.toBase58());
+            peak = Math.max(peak, ++active);
+            await new Promise(resolve => setTimeout(resolve, 5));
+            active--;
+            return 6;
+          },
+        } as unknown as FutarchyService,
+      });
+      const res = await request(app).get('/dexscreener/events').query({ fromBlock: 451277837, toBlock: 451277837 });
+      expect(res.status).toBe(200);
+      expect(res.body.events).toHaveLength(12);
+      expect(calls).toHaveLength(13);
+      expect(new Set(calls).size).toBe(13);
+      expect(peak).toBeGreaterThan(2);
+      expect(peak).toBeLessThanOrEqual(8);
+      expect(active).toBe(0);
+    });
+
     for (const failedMint of [BASE_MINT, QUOTE_MINT]) {
       it(`fails the whole response when decimals cannot be loaded for ${failedMint}`, async () => {
         const app = createTestApp({

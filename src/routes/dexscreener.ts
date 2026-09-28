@@ -266,18 +266,17 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
     let txnIndex = -1;
     let eventIndex = 0;
 
-    // Reuse the service's on-chain decimals cache, and resolve each mint only
-    // once in this response. Failed lookups must fail the request, never default
-    // to six decimals and silently misprice a token.
-    const divisors = new Map<string, Promise<number>>();
-    function getDivisor(mint: string): Promise<number> {
-      let divisor = divisors.get(mint);
-      if (!divisor) {
-        divisor = getFutarchyService().getTokenDecimals(new PublicKey(mint))
-          .then(decimals => 10 ** decimals);
-        divisors.set(mint, divisor);
-      }
-      return divisor;
+    // Resolve distinct mints in bounded batches to avoid both serial cold-cache
+    // latency and an unbounded RPC burst. Reuse the service's on-chain cache;
+    // failed lookups fail the request rather than defaulting to six decimals.
+    const divisors = new Map<string, number>();
+    const mints = [...new Set<string>(result.rows.flatMap(row => [row.base_mint, row.quote_mint]))];
+    const MINT_LOOKUP_BATCH_SIZE = 8;
+    for (let i = 0; i < mints.length; i += MINT_LOOKUP_BATCH_SIZE) {
+      await Promise.all(mints.slice(i, i + MINT_LOOKUP_BATCH_SIZE).map(async mint => {
+        const decimals = await getFutarchyService().getTokenDecimals(new PublicKey(mint));
+        divisors.set(mint, 10 ** decimals);
+      }));
     }
 
     for (const row of result.rows) {
@@ -299,10 +298,8 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
       }
 
       const swapType = row.swap_type.trim().toLowerCase();
-      const [baseDivisor, quoteDivisor] = await Promise.all([
-        getDivisor(row.base_mint),
-        getDivisor(row.quote_mint),
-      ]);
+      const baseDivisor = divisors.get(row.base_mint)!;
+      const quoteDivisor = divisors.get(row.quote_mint)!;
       const inputAmount = Number(row.input_amount) / (swapType === 'buy' ? quoteDivisor : baseDivisor);
       const outputAmount = Number(row.output_amount) / (swapType === 'buy' ? baseDivisor : quoteDivisor);
 
