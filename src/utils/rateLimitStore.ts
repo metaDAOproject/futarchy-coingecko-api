@@ -61,18 +61,21 @@ return {count, ttl}
 const KEY_PREFIX = 'futarchy-external-api:ratelimit:';
 
 /** The subset of Bun's RedisClient the store uses (a fake in tests). */
-export type RedisLike = Pick<RedisClient, 'connected' | 'connect' | 'send'>;
+export type RedisLike = Pick<RedisClient, 'connected' | 'connect' | 'send' | 'close'>;
 
 /**
  * Counters shared by every replica through Redis, so the published limits
  * hold however many replicas run.
  *
  * Rate limiting must never take the API down: while Redis is unreachable,
- * slow (over `timeoutMs`) or erroring, each request is counted in the
- * per-process fallback instead, and a reconnect is attempted at most every
- * `reconnectIntervalMs`; after a failed or slow command Redis is skipped for
- * that long too. (Bun's client, with the offline queue disabled so
- * commands fail fast, does not reconnect by itself once it has given up.)
+ * slow (over `timeoutMs`) or erroring, requests are limited by the
+ * per-process `local` counters instead. Every request is counted locally as
+ * well, so a fallback mid-window keeps the budget this replica already spent
+ * rather than granting a fresh one. A failed or slow command drops the
+ * connection (it may be stuck half-open) and skips Redis for
+ * `reconnectIntervalMs`; a reconnect is attempted at most that often. (Bun's
+ * client, with the offline queue disabled so commands fail fast, does not
+ * reconnect by itself once it has given up.)
  */
 export class RedisRateLimitStore implements RateLimitStore {
   private connecting = false;
@@ -82,23 +85,23 @@ export class RedisRateLimitStore implements RateLimitStore {
 
   constructor(
     private readonly client: RedisLike,
-    private readonly fallback: RateLimitStore,
+    private readonly local: RateLimitStore,
     private readonly options = { timeoutMs: 250, reconnectIntervalMs: 5_000 },
   ) {
     this.ensureConnected();
   }
 
   async hit(key: string, windowMs: number): Promise<RateLimitHit> {
+    const local = await this.local.hit(key, windowMs);
     // Circuit breaker: after a failure, skip Redis for reconnectIntervalMs so a
-    // half-open connection (connected, never answering) costs one timeout,
-    // not timeoutMs added to every request.
+    // half-open connection costs one timeout, not timeoutMs on every request.
     if (Date.now() < this.bypassUntil) {
-      return this.fallback.hit(key, windowMs);
+      return local;
     }
     if (!this.client.connected) {
       this.ensureConnected();
       this.logDegraded('not connected');
-      return this.fallback.hit(key, windowMs);
+      return local;
     }
     try {
       const [count, ttl] = await this.withTimeout(
@@ -108,8 +111,12 @@ export class RedisRateLimitStore implements RateLimitStore {
     } catch (error) {
       this.bypassUntil = Date.now() + this.options.reconnectIntervalMs;
       this.logDegraded(error instanceof Error ? error.message : String(error));
+      // A timed-out command may sit on a half-open socket that still reports
+      // `connected`; drop it so the reconnect opens a fresh one instead of
+      // queueing more commands behind it.
+      this.client.close();
       this.ensureConnected();
-      return this.fallback.hit(key, windowMs);
+      return local;
     }
   }
 

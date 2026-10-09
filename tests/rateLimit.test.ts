@@ -124,17 +124,42 @@ describe('Rate limiting', () => {
         () => new Promise(() => {}), // accepted, never answered
       ]) {
         let sends = 0;
+        let closes = 0;
         const send = () => { sends++; return failure(); };
-        const client = { connected: true, connect: async () => {}, send } as unknown as RedisLike;
+        const client = { connected: true, connect: async () => {}, send, close: () => { closes++; } } as unknown as RedisLike;
         const store = new RedisRateLimitStore(client, new MemoryRateLimitStore(), { timeoutMs: 20, reconnectIntervalMs: 60_000 });
         const app = createApp({ services: createTestServices(), rateLimitStore: store });
 
         expect((await request(app).get('/health')).status).toBe(200);
         expect((await request(app).get('/health')).status).toBe(200);
         expect((await request(app).get('/health')).status).toBe(429);
-        // Circuit breaker: only the first request waited on Redis.
+        // Circuit breaker: only the first request waited on Redis, and its
+        // possibly half-open connection was dropped.
         expect(sends).toBe(1);
+        expect(closes).toBe(1);
       }
+    });
+
+    it('keeps the budget already spent through Redis when it fails mid-window', async () => {
+      config.server.rateLimit.maxRequests = 2;
+      let redisCount = 0;
+      let redisUp = true;
+      const client = {
+        connected: true,
+        connect: async () => {},
+        close: () => {},
+        send: async () => {
+          if (!redisUp) throw new Error('Connection has failed');
+          return [++redisCount, 30_000];
+        },
+      } as unknown as RedisLike;
+      const store = new RedisRateLimitStore(client, new MemoryRateLimitStore(), { timeoutMs: 20, reconnectIntervalMs: 60_000 });
+      const app = createApp({ services: createTestServices(), rateLimitStore: store });
+
+      expect((await request(app).get('/health')).status).toBe(200);
+      expect((await request(app).get('/health')).status).toBe(200);
+      redisUp = false;
+      expect((await request(app).get('/health')).status).toBe(429);
     });
 
     it('reconnects a disconnected Redis client and uses it once connected', async () => {
@@ -143,6 +168,7 @@ describe('Rate limiting', () => {
       const client = {
         get connected() { return connected; },
         connect: async () => { connects++; connected = true; },
+        close: () => { connected = false; },
         send: async () => [7, 30_000],
       } as unknown as RedisLike;
       const store = new RedisRateLimitStore(client, new MemoryRateLimitStore(), { timeoutMs: 20, reconnectIntervalMs: 0 });
