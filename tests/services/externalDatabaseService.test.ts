@@ -43,3 +43,31 @@ describe('ExternalDatabaseService.ping (readiness)', () => {
     expect(connects).toBe(1);
   });
 });
+
+describe('ExternalDatabaseService served aggregates', () => {
+  it('coalesces concurrent reads into one query, reuses the result, and never caches a failure', async () => {
+    let queries = 0;
+    let fail = true;
+    const svc = new ExternalDatabaseService();
+    (svc as any).isConnected = true;
+    (svc as any).pool = {
+      query: async () => {
+        queries++;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (fail) throw new Error('connection terminated');
+        return { rows: [{ token: 'A', first_date: '2025-01-01' }] };
+      },
+    };
+
+    await expect(svc.getFirstTradeDates()).rejects.toThrow('connection terminated');
+    expect(queries).toBe(1);
+
+    fail = false;
+    const results = await Promise.all([svc.getFirstTradeDates(), svc.getFirstTradeDates()]);
+    expect(results.map((m) => m.get('A'))).toEqual(['2025-01-01', '2025-01-01']);
+    expect(queries).toBe(2);
+
+    await svc.getFirstTradeDates();
+    expect(queries).toBe(2);
+  });
+});

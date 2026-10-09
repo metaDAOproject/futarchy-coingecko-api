@@ -224,7 +224,11 @@ Returns the latest Solana slot for which swap data is available.
 
 #### GET `/dexscreener/asset?id=:mintAddress`
 
-Returns token metadata for a given Solana mint address. Fetched from on-chain Metaplex Token Metadata.
+Returns token metadata and supply for a given Solana mint address. Name/symbol come
+from on-chain Metaplex Token Metadata; `totalSupply` / `circulatingSupply` use the same
+launchpad-aware breakdown as `/api/supply/:mint`. If supply can't be loaded (RPC
+failure) the request returns 5xx instead of an asset without supply, so neither this
+API's 5-minute cache nor DexScreener stores a partial asset.
 
 **Response:**
 ```json
@@ -233,6 +237,8 @@ Returns token metadata for a given Solana mint address. Fetched from on-chain Me
     "id": "ZKFHiLAfAFMTcDAuCtjNW54VzpERvoe7PBF9mYgmeta",
     "name": "ZKFG",
     "symbol": "ZKFG",
+    "totalSupply": 1000000000,
+    "circulatingSupply": 412500000,
     "metadata": {
       "decimals": "6"
     }
@@ -298,6 +304,11 @@ Returns swap events in the given Solana slot range (both inclusive). Events are 
 #### GET `/api/market-data?startDate=YYYY-MM-DD&endDate=YYYY-MM-DD&tokens=TOKEN1,TOKEN2`
 
 Returns daily market data for the given date range, split by Futarchy AMM and Meteora sources.
+
+Both dates are required, must be real calendar dates, and `startDate` must be on
+or before `endDate`. `tokens` is optional: up to 100 comma-separated base-token
+mint addresses. Anything else is a `400 INVALID_QUERY_PARAMETER` naming the
+`field`, returned before the database is touched.
 
 **Data source**: both FutarchyAMM and Meteora data come from the unified
 `futarchy.user_pool_daily` ETL table in the served DB. The served DB is a hard
@@ -460,6 +471,8 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `CACHE_CONTROL_MAX_AGE` | `Cache-Control` max-age (seconds) on successful data responses | `30` |
 | `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing. Keep it + 15s under the container's termination grace period | `10000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
+| `CACHE_SERVED_METRICS_TTL` | Reuse window (ms) for the served-DB aggregates behind `/api/tickers` and `/cmc/*` (24h volume, 24h-ago reserves, first-trade dates). Concurrent requests share one query; failures are never cached. `0` only coalesces concurrent queries | `30000` |
+| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARN` or `ERROR`. `INFO` writes one structured access-log line per request (probes and `/metrics` excluded) | `INFO` |
 | **Served indexer DB (required — the only database this API uses)** | | |
 | `DATABASE_PG_URL` | Read-only connection to the served indexer DB (Meteora, tickers, DexScreener, first-trade-dates). **Required** — `/api/market-data`, `/api/tickers`, `/cmc/summary`, `/cmc/ticker`, and the DexScreener routes return 503 without it. | — |
 | `DATABASE_PG_SSL` | Enable SSL (server cert verified against system CAs) | `false` |
@@ -559,23 +572,31 @@ exits with an error instead of silently becoming `NaN`.
 
 ## Error Handling
 
+Every error, on every endpoint, uses one JSON shape:
+
 ```json
 {
-  "error": "Error message",
-  "code": "ERROR_CODE",
+  "error": "startDate must be on or before endDate",
+  "code": "INVALID_QUERY_PARAMETER",
+  "field": "startDate",
   "requestId": "uuid"
 }
 ```
 
+Branch on `code` (stable); `error` is a human-readable message and may change.
+`field` appears on a 400 and names the rejected parameter. `requestId` matches
+the `X-Request-Id` response header and the server's access log, so quote it when
+reporting a problem.
+
 | Code | Description |
 |------|-------------|
-| `400` | Bad Request (missing/invalid parameters, or a repeated query parameter) |
+| `400` | `INVALID_QUERY_PARAMETER` (missing, malformed or repeated query parameter) or `INVALID_MINT_ADDRESS` |
 | `401` | Unauthorized (invalid `X-API-Key`) |
 | `404` | Not Found (unknown routes also answer in this JSON shape, `code: "NOT_FOUND"`) |
 | `429` | Rate limit exceeded |
 | `503` | `code: "REQUEST_TIMEOUT"` when the response took longer than `SERVER_REQUEST_TIMEOUT` |
-| `503` | Service unavailable (DB not connected) |
-| `500` | Internal server error |
+| `503` | `SERVED_DB_UNAVAILABLE` (served DB not connected) and other dependency outages |
+| `500` | `INTERNAL_ERROR` (unexpected server or upstream RPC/DB failure); retry later |
 
 ## License
 

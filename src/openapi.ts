@@ -153,7 +153,7 @@ export const openApiSpec = {
       '',
       '**Serving invariant.** Infrastructure failures (Solana RPC, served database) return a 5xx. The API never answers 200 with zero, empty, or placeholder financial data because a dependency failed. Retry on 5xx; treat a 200 as authoritative.',
       '',
-      '**Errors.** Errors are JSON. Most use the `Error` schema (`{ error, code?, requestId? }`); a few adapter-specific paths use a bare `{ error }` or the market-data `ValidationError` shape, as documented per operation. Each request may take each query parameter at most once: a repeated parameter is a 400 `INVALID_QUERY_PARAMETER`. Unknown routes return 404 `NOT_FOUND`. A request that exceeds the server timeout returns 503 `REQUEST_TIMEOUT`.',
+      '**Errors.** Every error is JSON in one shape, the `Error` schema: `{ error, code, field?, requestId }`. Branch on `code` (stable), not on the `error` message (human-readable, may change); `field` names the offending parameter on a 400. Each request may take each query parameter at most once: a repeated parameter is a 400 `INVALID_QUERY_PARAMETER`. Unknown routes return 404 `NOT_FOUND`. A request that exceeds the server timeout returns 503 `REQUEST_TIMEOUT`.',
     ].join('\n'),
   },
   servers: [{ url: '/' }],
@@ -246,7 +246,7 @@ export const openApiSpec = {
         parameters: [
           {
             name: 'startDate', in: 'query', required: true,
-            description: 'First UTC day, inclusive (YYYY-MM-DD).',
+            description: 'First UTC day, inclusive (YYYY-MM-DD). Must be a real calendar date on or before `endDate`.',
             schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
             example: '2026-01-01',
           },
@@ -258,25 +258,13 @@ export const openApiSpec = {
           },
           {
             name: 'tokens', in: 'query', required: false,
-            description: 'Comma-separated base-token mints to filter by. Omit for all tokens.',
+            description: 'Comma-separated base-token mints to filter by (at most 100, each a valid Solana address). Omit for all tokens.',
             schema: { type: 'string' },
           },
         ],
         responses: {
           '200': jsonOk('Daily market data.', ref('MarketDataResponse')),
-          '400': {
-            description: 'Missing or malformed parameter (`ValidationError`), or a repeated query parameter (`Error` with code `INVALID_QUERY_PARAMETER`).',
-            headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-            content: { 'application/json': { schema: { anyOf: [ref('ValidationError'), ref('Error')] } } },
-          },
-          '401': responseRef('Unauthorized'),
-          '429': responseRef('TooManyRequests'),
-          '500': responseRef('InternalError'),
-          '503': {
-            description: 'Served database not connected (`{ error, message }`), or request timeout (`Error` with code `REQUEST_TIMEOUT`).',
-            headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-            content: { 'application/json': { schema: { anyOf: [ref('ServiceUnavailableMessage'), ref('Error')] } } },
-          },
+          ...COMMON_ERRORS,
         },
       },
     },
@@ -472,7 +460,7 @@ export const openApiSpec = {
           '404': responseRef('DexScreenerNotFound'),
           '429': responseRef('TooManyRequests'),
           '500': responseRef('InternalError'),
-          '503': responseRef('DexScreenerUnavailable'),
+          '503': responseRef('ServiceUnavailable'),
         },
       },
     },
@@ -481,7 +469,7 @@ export const openApiSpec = {
       get: {
         operationId: 'getDexScreenerAsset',
         summary: 'Asset metadata',
-        description: 'Token name, symbol, decimals and (when it can be loaded) supply. Cached server-side for 5 minutes.',
+        description: 'Token name, symbol, decimals and supply. Cached server-side for 5 minutes. If supply cannot be loaded (RPC failure) the request fails with a 5xx rather than returning the asset without it.',
         tags: ['DexScreener'],
         security: OPTIONAL_API_KEY,
         parameters: [
@@ -493,7 +481,7 @@ export const openApiSpec = {
         ],
         responses: {
           '200': jsonOk('Asset.', ref('DexScreenerAssetResponse')),
-          '400': responseRef('DexScreenerBadRequest'),
+          '400': responseRef('BadRequest'),
           '401': responseRef('Unauthorized'),
           '429': responseRef('TooManyRequests'),
           '500': responseRef('InternalError'),
@@ -518,12 +506,12 @@ export const openApiSpec = {
         ],
         responses: {
           '200': jsonOk('Pair.', ref('DexScreenerPairResponse')),
-          '400': responseRef('DexScreenerBadRequest'),
+          '400': responseRef('BadRequest'),
           '401': responseRef('Unauthorized'),
           '404': responseRef('DexScreenerNotFound'),
           '429': responseRef('TooManyRequests'),
           '500': responseRef('InternalError'),
-          '503': responseRef('DexScreenerUnavailable'),
+          '503': responseRef('ServiceUnavailable'),
         },
       },
     },
@@ -549,11 +537,11 @@ export const openApiSpec = {
         ],
         responses: {
           '200': jsonOk('Swap events.', ref('DexScreenerEventsResponse')),
-          '400': responseRef('DexScreenerBadRequest'),
+          '400': responseRef('BadRequest'),
           '401': responseRef('Unauthorized'),
           '429': responseRef('TooManyRequests'),
           '500': responseRef('InternalError'),
-          '503': responseRef('DexScreenerUnavailable'),
+          '503': responseRef('ServiceUnavailable'),
         },
       },
     },
@@ -713,7 +701,7 @@ export const openApiSpec = {
 
     responses: {
       BadRequest: {
-        description: 'Invalid request: e.g. `INVALID_MINT_ADDRESS`, or `INVALID_QUERY_PARAMETER` for a repeated query parameter.',
+        description: 'Invalid request: `INVALID_MINT_ADDRESS` for a bad path address, `INVALID_QUERY_PARAMETER` for a missing, malformed or repeated query parameter. `field` names the parameter.',
         headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
         content: { 'application/json': { schema: ref('Error') } },
       },
@@ -748,20 +736,10 @@ export const openApiSpec = {
         headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
         content: { 'application/json': { schema: ref('Error') } },
       },
-      DexScreenerBadRequest: {
-        description: 'Missing/invalid parameter (bare `{ error }`), or a repeated query parameter (`Error` with code `INVALID_QUERY_PARAMETER`).',
-        headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-        content: { 'application/json': { schema: { anyOf: [ref('SimpleError'), ref('Error')] } } },
-      },
       DexScreenerNotFound: {
-        description: 'No matching data (`{ error: "Pair not found" }` / `{ error: "No blocks available" }`).',
+        description: 'No matching data (`NOT_FOUND`: "Pair not found" / "No blocks available").',
         headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-        content: { 'application/json': { schema: ref('SimpleError') } },
-      },
-      DexScreenerUnavailable: {
-        description: 'Served database not available (bare `{ error }`), or request timeout (`Error` with code `REQUEST_TIMEOUT`).',
-        headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-        content: { 'application/json': { schema: { anyOf: [ref('SimpleError'), ref('Error')] } } },
+        content: { 'application/json': { schema: ref('Error') } },
       },
       CmcSummary: jsonOk('Array of pair summaries.', { type: 'array', items: ref('CoinMarketCapSummaryPair') }),
       CmcTicker: jsonOk('Tickers keyed by `BASE_QUOTE` trading pair.', ref('CoinMarketCapTickerResponse')),
@@ -772,41 +750,17 @@ export const openApiSpec = {
       // -------------------------------------------------------------- errors
       Error: {
         type: 'object',
-        description: 'Standard error body (errorHandler, 404 and 429).',
-        required: ['error'],
+        description: 'The error body of every endpoint.',
+        required: ['error', 'code', 'requestId'],
         properties: {
-          error: { type: 'string', description: 'Human-readable message.' },
+          error: { type: 'string', description: 'Human-readable message. May change; branch on `code`.' },
           code: {
             type: 'string',
-            description: 'Machine-readable code, when available.',
-            examples: ['NOT_FOUND', 'RATE_LIMITED', 'INVALID_API_KEY', 'INVALID_QUERY_PARAMETER', 'INVALID_MINT_ADDRESS', 'SERVED_DB_UNAVAILABLE', 'REQUEST_TIMEOUT'],
+            description: 'Stable machine-readable code.',
+            examples: ['NOT_FOUND', 'RATE_LIMITED', 'INVALID_API_KEY', 'INVALID_QUERY_PARAMETER', 'INVALID_MINT_ADDRESS', 'SERVED_DB_UNAVAILABLE', 'REQUEST_TIMEOUT', 'INTERNAL_ERROR'],
           },
+          field: { type: 'string', description: 'On a 400: the request parameter that was rejected.', examples: ['startDate', 'id'] },
           requestId: { type: 'string', description: 'Request id, same as the `X-Request-Id` header.' },
-        },
-      },
-      SimpleError: {
-        type: 'object',
-        description: 'Bare error body used by some DexScreener adapter paths.',
-        required: ['error'],
-        properties: { error: { type: 'string' } },
-      },
-      ValidationError: {
-        type: 'object',
-        description: 'Parameter validation error used by `/api/market-data`.',
-        required: ['error', 'message'],
-        properties: {
-          error: { type: 'string', examples: ['Missing required parameter', 'Invalid date format', 'Invalid date'] },
-          message: { type: 'string' },
-          field: { type: 'string', examples: ['startDate'] },
-        },
-      },
-      ServiceUnavailableMessage: {
-        type: 'object',
-        description: 'Served-database-unavailable body used by `/api/market-data`.',
-        required: ['error', 'message'],
-        properties: {
-          error: { type: 'string', examples: ['Served database not available'] },
-          message: { type: 'string' },
         },
       },
 
@@ -915,12 +869,12 @@ export const openApiSpec = {
       },
       DexScreenerAsset: {
         type: 'object',
-        required: ['id', 'name', 'symbol'],
+        required: ['id', 'name', 'symbol', 'totalSupply', 'circulatingSupply', 'metadata'],
         properties: {
           id: { ...solanaAddress, description: 'Token mint.' },
           name: { type: 'string', description: 'Falls back to the first 8 characters of the mint.' },
           symbol: { type: 'string', description: 'Falls back to the first 8 characters of the mint.' },
-          totalSupply: { type: 'number', description: 'Human units. Omitted (together with circulatingSupply) when supply cannot be loaded.' },
+          totalSupply: { type: 'number', description: 'Human units.' },
           circulatingSupply: { type: 'number', description: 'Human units.' },
           metadata: {
             type: 'object',

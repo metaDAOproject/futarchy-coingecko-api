@@ -1,8 +1,7 @@
 import { Router, type Request, type Response } from 'express';
-import { parseSolanaAddress } from '../utils/validation.js';
+import { parseSolanaAddress, orBadRequest } from '../utils/validation.js';
 import type { ServiceGetters } from './types.js';
-import { asyncHandler, AppError } from '../middleware/errorHandler.js';
-import { logger } from '../utils/logger.js';
+import { asyncHandler } from '../middleware/errorHandler.js';
 import { getSupplyInfoWithLaunchpadAllocation } from '../services/supplyWithLaunchpadAllocation.js';
 
 export function createSupplyRouter(services: ServiceGetters): Router {
@@ -11,36 +10,28 @@ export function createSupplyRouter(services: ServiceGetters): Router {
 
   // Get complete supply info for a token
   router.get('/api/supply/:mintAddress', asyncHandler(async (req: Request, res: Response) => {
-    // Validate mint address
-    const mintAddressResult = parseSolanaAddress(req.params.mintAddress, 'mintAddress');
-    if (!mintAddressResult.success) {
-      throw AppError.badRequest(mintAddressResult.error.message, 'INVALID_MINT_ADDRESS');
-    }
-    const mintAddress = mintAddressResult.value;
-      const solanaService = getSolanaService();
-      const launchpadService = getLaunchpadService();
+    const mintAddress = orBadRequest(parseSolanaAddress(req.params.mintAddress, 'mintAddress'), 'INVALID_MINT_ADDRESS');
+    const solanaService = getSolanaService();
+    const launchpadService = getLaunchpadService();
 
-      const { supplyInfo } = await getSupplyInfoWithLaunchpadAllocation(
-        mintAddress,
-        solanaService,
-        launchpadService,
-      );
+    const { supplyInfo } = await getSupplyInfoWithLaunchpadAllocation(
+      mintAddress,
+      solanaService,
+      launchpadService,
+    );
 
-      res.json({
-        result: supplyInfo.totalSupply,
-        data: supplyInfo,
-      });
+    res.json({
+      result: supplyInfo.totalSupply,
+      data: supplyInfo,
+    });
   }));
 
   // Get total supply for a token
   router.get('/api/supply/:mintAddress/total', asyncHandler(async (req: Request, res: Response) => {
-    const mintAddressResult = parseSolanaAddress(req.params.mintAddress, 'mintAddress');
-    if (!mintAddressResult.success) {
-      throw AppError.badRequest(mintAddressResult.error.message, 'INVALID_MINT_ADDRESS');
-    }
+    const mintAddress = orBadRequest(parseSolanaAddress(req.params.mintAddress, 'mintAddress'), 'INVALID_MINT_ADDRESS');
 
     const solanaService = getSolanaService();
-    const totalSupply = await solanaService.getTotalSupply(mintAddressResult.value);
+    const totalSupply = await solanaService.getTotalSupply(mintAddress);
 
     res.json({
       result: totalSupply,
@@ -49,11 +40,7 @@ export function createSupplyRouter(services: ServiceGetters): Router {
 
   // Get circulating supply for a token
   router.get('/api/supply/:mintAddress/circulating', asyncHandler(async (req: Request, res: Response) => {
-    const mintAddressResult = parseSolanaAddress(req.params.mintAddress, 'mintAddress');
-    if (!mintAddressResult.success) {
-      throw AppError.badRequest(mintAddressResult.error.message, 'INVALID_MINT_ADDRESS');
-    }
-    const mintAddress = mintAddressResult.value;
+    const mintAddress = orBadRequest(parseSolanaAddress(req.params.mintAddress, 'mintAddress'), 'INVALID_MINT_ADDRESS');
 
     const solanaService = getSolanaService();
     const launchpadService = getLaunchpadService();
@@ -116,11 +103,7 @@ export function createSupplyRouter(services: ServiceGetters): Router {
 
   // Jupiter-compatible circulating supply
   router.get('/api/supply/:mintAddress/jupiter/circulating', asyncHandler(async (req: Request, res: Response) => {
-    const mintAddressResult = parseSolanaAddress(req.params.mintAddress, 'mintAddress');
-    if (!mintAddressResult.success) {
-      throw AppError.badRequest(mintAddressResult.error.message, 'INVALID_MINT_ADDRESS');
-    }
-    const mintAddress = mintAddressResult.value;
+    const mintAddress = orBadRequest(parseSolanaAddress(req.params.mintAddress, 'mintAddress'), 'INVALID_MINT_ADDRESS');
 
     const solanaService = getSolanaService();
     const launchpadService = getLaunchpadService();
@@ -136,13 +119,10 @@ export function createSupplyRouter(services: ServiceGetters): Router {
 
   // Jupiter-compatible total supply
   router.get('/api/supply/:mintAddress/jupiter/total', asyncHandler(async (req: Request, res: Response) => {
-    const mintAddressResult = parseSolanaAddress(req.params.mintAddress, 'mintAddress');
-    if (!mintAddressResult.success) {
-      throw AppError.badRequest(mintAddressResult.error.message, 'INVALID_MINT_ADDRESS');
-    }
+    const mintAddress = orBadRequest(parseSolanaAddress(req.params.mintAddress, 'mintAddress'), 'INVALID_MINT_ADDRESS');
 
     const solanaService = getSolanaService();
-    const supplyInfo = await solanaService.getSupplyInfo(mintAddressResult.value);
+    const supplyInfo = await solanaService.getSupplyInfo(mintAddress);
 
     res.json({ totalSupply: parseFloat(supplyInfo.totalSupply) });
   }));

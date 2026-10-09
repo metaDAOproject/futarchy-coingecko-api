@@ -80,6 +80,11 @@ export const config = {
     // TTL for the /api/launches/live snapshot (default: 5 minutes). Each refresh
     // scans every launch account plus the funding records of each live launch.
     liveLaunchesTTL: intEnv('CACHE_LIVE_LAUNCHES_TTL', 300000),
+    // How long (ms) the served-DB aggregates behind /api/tickers and /cmc/*
+    // (rolling-24h volume, 24h-ago reserves, first-trade dates) are reused
+    // across requests. Matches the default Cache-Control max-age; the ETL
+    // itself lags by more than this. 0 still coalesces concurrent queries.
+    servedMetricsTTL: intEnv('CACHE_SERVED_METRICS_TTL', 30000),
   },
   dex: {
     forkType: process.env.DEX_FORK_TYPE || 'Custom',

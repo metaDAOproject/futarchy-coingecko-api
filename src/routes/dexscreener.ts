@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import { PublicKey } from '@solana/web3.js';
-import { asyncHandler } from '../middleware/errorHandler.js';
+import { AppError, asyncHandler } from '../middleware/errorHandler.js';
+import { parseSolanaAddress, orBadRequest } from '../utils/validation.js';
 import { logger } from '../utils/logger.js';
 import { config } from '../config.js';
 import type { ServiceGetters } from './types.js';
@@ -29,6 +30,14 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
   const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
   const CACHE_MAX_ENTRIES = 1000;
 
+  function requireServedDb() {
+    const extDb = getExternalDatabaseService();
+    if (!extDb?.isAvailable()) {
+      throw AppError.serviceUnavailable('Served database not available', 'SERVED_DB_UNAVAILABLE');
+    }
+    return extDb;
+  }
+
   function cachePut<T>(cache: Map<string, T>, key: string, value: T): void {
     if (cache.size >= CACHE_MAX_ENTRIES) {
       // Evict oldest insertion (Map preserves insertion order)
@@ -42,10 +51,7 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
   // GET /dexscreener/latest-block
   // ---------------------------------------------------------------
   router.get('/dexscreener/latest-block', asyncHandler(async (_req: Request, res: Response) => {
-    const extDb = getExternalDatabaseService();
-    if (!extDb || !extDb.isAvailable()) {
-      return res.status(503).json({ error: 'External database not available' });
-    }
+    const extDb = requireServedDb();
 
     const result = await extDb.query(`
       SELECT slot, extract(epoch FROM block_time)::bigint AS unix_timestamp
@@ -56,7 +62,7 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
     `);
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'No blocks available' });
+      throw AppError.notFound('No blocks available', 'NOT_FOUND');
     }
 
     const row = result.rows[0];
@@ -74,10 +80,7 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
   // GET /dexscreener/asset?id=:string
   // ---------------------------------------------------------------
   router.get('/dexscreener/asset', asyncHandler(async (req: Request, res: Response) => {
-    const id = req.query.id as string;
-    if (!id) {
-      return res.status(400).json({ error: 'Missing required parameter: id' });
-    }
+    const id = orBadRequest(parseSolanaAddress(req.query.id as string, 'id'));
 
     const cached = assetCache.get(id);
     if (cached && cached.expiresAt > Date.now()) {
@@ -88,47 +91,24 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
     const solanaService = getSolanaService();
     const launchpadService = getLaunchpadService();
 
-    let mintPubkey: PublicKey;
-    try {
-      mintPubkey = new PublicKey(id);
-    } catch {
-      return res.status(400).json({ error: 'Invalid asset id (not a valid Solana address)' });
-    }
+    const mintPubkey = new PublicKey(id);
 
-    const [metadata, decimals] = await Promise.all([
+    // Supply failures (RPC) propagate as a 5xx like every other financial path:
+    // a 200 without supply would be cached here for CACHE_TTL_MS and by
+    // DexScreener, hiding the market cap until both caches expire.
+    const [metadata, decimals, { supplyInfo }] = await Promise.all([
       futarchyService.getTokenMetadata(mintPubkey),
       futarchyService.getTokenDecimals(mintPubkey),
+      getSupplyInfoWithLaunchpadAllocation(id, solanaService, launchpadService),
     ]);
-
-    let totalSupply: number | undefined;
-    let circulatingSupply: number | undefined;
-    try {
-      const { supplyInfo } = await getSupplyInfoWithLaunchpadAllocation(
-        id,
-        solanaService,
-        launchpadService,
-      );
-      const total = parseFloat(supplyInfo.totalSupply);
-      const circ = parseFloat(supplyInfo.circulatingSupply);
-      if (Number.isFinite(total) && Number.isFinite(circ)) {
-        totalSupply = total;
-        circulatingSupply = circ;
-      }
-    } catch (err) {
-      logger.warn('[DexScreener] /asset could not load supply', {
-        mint: id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
 
     const response: DexScreenerAssetResponse = {
       asset: {
         id,
         name: metadata?.name || id.slice(0, 8),
         symbol: metadata?.symbol || id.slice(0, 8),
-        ...(totalSupply !== undefined && circulatingSupply !== undefined
-          ? { totalSupply, circulatingSupply }
-          : {}),
+        totalSupply: Number(supplyInfo.totalSupply),
+        circulatingSupply: Number(supplyInfo.circulatingSupply),
         metadata: {
           decimals: String(decimals),
         },
@@ -143,20 +123,14 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
   // GET /dexscreener/pair?id=:string
   // ---------------------------------------------------------------
   router.get('/dexscreener/pair', asyncHandler(async (req: Request, res: Response) => {
-    const id = req.query.id as string;
-    if (!id) {
-      return res.status(400).json({ error: 'Missing required parameter: id' });
-    }
+    const id = orBadRequest(parseSolanaAddress(req.query.id as string, 'id'));
 
     const cached = pairCache.get(id);
     if (cached && cached.expiresAt > Date.now()) {
       return res.json(cached.data);
     }
 
-    const extDb = getExternalDatabaseService();
-    if (!extDb || !extDb.isAvailable()) {
-      return res.status(503).json({ error: 'External database not available' });
-    }
+    const extDb = requireServedDb();
 
     // Pair identity + creation (first spot swap) from the unified ETL output. One
     // query: the earliest futarchy spot swap for the DAO carries its base/quote
@@ -176,7 +150,7 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
     );
 
     if (pairResult.rows.length === 0) {
-      return res.status(404).json({ error: 'Pair not found' });
+      throw AppError.notFound('Pair not found', 'NOT_FOUND');
     }
 
     const dao = pairResult.rows[0];
@@ -205,23 +179,24 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
     const fromBlock = Number(req.query.fromBlock);
     const toBlock = Number(req.query.toBlock);
 
-    if (!Number.isSafeInteger(fromBlock) || !Number.isSafeInteger(toBlock) || fromBlock < 0) {
-      return res.status(400).json({ error: 'fromBlock and toBlock must be non-negative integers' });
+    // Number('') is 0, so an empty/missing bound must be rejected explicitly.
+    if (!req.query.fromBlock || !Number.isSafeInteger(fromBlock) || fromBlock < 0) {
+      throw AppError.badRequest('fromBlock must be a non-negative integer', 'INVALID_QUERY_PARAMETER', 'fromBlock');
+    }
+    if (!req.query.toBlock || !Number.isSafeInteger(toBlock)) {
+      throw AppError.badRequest('toBlock must be a non-negative integer', 'INVALID_QUERY_PARAMETER', 'toBlock');
     }
 
     if (toBlock < fromBlock) {
-      return res.status(400).json({ error: 'toBlock must be >= fromBlock' });
+      throw AppError.badRequest('toBlock must be >= fromBlock', 'INVALID_QUERY_PARAMETER', 'toBlock');
     }
 
     const MAX_BLOCK_WINDOW = 500_000;
     if (toBlock - fromBlock > MAX_BLOCK_WINDOW) {
-      return res.status(400).json({ error: `Block range too large (max ${MAX_BLOCK_WINDOW} slots per request)` });
+      throw AppError.badRequest(`Block range too large (max ${MAX_BLOCK_WINDOW} slots per request)`, 'INVALID_QUERY_PARAMETER', 'toBlock');
     }
 
-    const extDb = getExternalDatabaseService();
-    if (!extDb || !extDb.isAvailable()) {
-      return res.status(503).json({ error: 'External database not available' });
-    }
+    const extDb = requireServedDb();
 
     // Query swap events in the slot range (both inclusive) from the unified ETL
     // output. Columns are aliased to the legacy v0_6 shape so the builder below is
