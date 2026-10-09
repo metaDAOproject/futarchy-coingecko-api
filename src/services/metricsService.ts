@@ -152,11 +152,12 @@ export class MetricsService {
   }
 
   /**
-   * A DAO/pool snapshot refresh succeeded with `count` served DAOs.
+   * A DAO/pool snapshot refresh succeeded with `count` served DAOs whose
+   * reserves were read at `readAtMs`.
    */
-  markDaoSnapshotRefreshed(count: number): void {
+  markDaoSnapshotRefreshed(count: number, readAtMs: number): void {
     activeDaosCount.set(count);
-    daoSnapshotLastSuccess.set(Date.now() / 1000);
+    daoSnapshotLastSuccess.set(readAtMs / 1000);
   }
 
   /**

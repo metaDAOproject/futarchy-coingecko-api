@@ -204,6 +204,10 @@ export class FutarchyService {
   // than the price snapshot.
   private static readonly DECIMALS_TTL_MS = config.cache.tickersTTL * 10;
   private static readonly METADATA_TTL_MS = config.cache.tickersTTL * 100;
+  // A mint with no Metaplex metadata account (confirmed by a successful RPC
+  // read, not an error) is remembered for a while so it isn't re-fetched on
+  // every refresh; a later-created metadata account is picked up after this.
+  private static readonly METADATA_ABSENT_TTL_MS = config.cache.tickersTTL * 10;
 
   async getTokenDecimals(mintAddress: PublicKey): Promise<number> {
     const cacheKey = `token_decimals_${mintAddress.toString()}`;
@@ -225,12 +229,18 @@ export class FutarchyService {
     const cacheKey = `token_metadata_${mintAddress.toString()}`;
     const cached = this.getCached<TokenMetadata>(cacheKey, FutarchyService.METADATA_TTL_MS);
     if (cached) return cached;
+    if (this.getCached<true>(`token_metadata_absent_${mintAddress}`, FutarchyService.METADATA_ABSENT_TTL_MS)) {
+      return null;
+    }
 
     try {
       const accountInfo = await this.retryWithBackoff(() =>
         this.connection.getAccountInfo(metadataAddress(mintAddress))
       );
-      if (!accountInfo?.data) return null;
+      if (!accountInfo?.data) {
+        this.setCache(`token_metadata_absent_${mintAddress}`, true);
+        return null;
+      }
 
       const metadata = parseTokenMetadata(accountInfo.data, mintAddress);
       this.setCache(cacheKey, metadata);
@@ -264,6 +274,7 @@ export class FutarchyService {
     );
     const needMetadata = unique.filter(
       (m) => !this.getCached<TokenMetadata>(`token_metadata_${m}`, FutarchyService.METADATA_TTL_MS)
+        && !this.getCached<true>(`token_metadata_absent_${m}`, FutarchyService.METADATA_ABSENT_TTL_MS)
     );
     if (needDecimals.length === 0 && needMetadata.length === 0) return;
 
@@ -278,6 +289,7 @@ export class FutarchyService {
       needMetadata.forEach((mint, i) => {
         const info = infos[needDecimals.length + i];
         if (info?.data) this.setCache(`token_metadata_${mint}`, parseTokenMetadata(info.data, mint));
+        else this.setCache(`token_metadata_absent_${mint}`, true);
       });
     } catch (error) {
       logger.warn('[Futarchy] Batched mint prefetch failed; falling back to per-mint lookups', {
@@ -323,7 +335,10 @@ export class FutarchyService {
    */
   async getAllDaos(): Promise<DaoTickerData[]> {
     const ageMs = this.allDaos ? Date.now() - this.allDaos.fetchedAt : Infinity;
-    if (this.allDaos && ageMs < config.cache.tickersTTL) return this.allDaos.data;
+    // Both limits apply, so a cap configured below the TTL is still honored.
+    if (this.allDaos && ageMs < config.cache.tickersTTL && ageMs < config.cache.tickersMaxStale) {
+      return this.allDaos.data;
+    }
 
     const refresh = this.refreshAllDaos();
     if (this.allDaos && ageMs < config.cache.tickersMaxStale) {
@@ -338,9 +353,15 @@ export class FutarchyService {
   private refreshAllDaos(): Promise<DaoTickerData[]> {
     if (!this.allDaosInFlight) {
       this.allDaosInFlight = this.fetchAllDaos()
-        .then((data) => {
-          this.allDaos = { data, fetchedAt: Date.now() };
-          metricsService.markDaoSnapshotRefreshed(data.length);
+        .then(({ data, readAt }) => {
+          // The snapshot is as old as its reserves, not as old as the end of
+          // the refresh: a slow refresh must not make old prices look fresh.
+          const ageMs = Date.now() - readAt;
+          if (ageMs >= config.cache.tickersMaxStale) {
+            throw new Error(`DAO snapshot took ${ageMs}ms to build, past the ${config.cache.tickersMaxStale}ms max-stale cap; discarding it`);
+          }
+          this.allDaos = { data, fetchedAt: readAt };
+          metricsService.markDaoSnapshotRefreshed(data.length, readAt);
           return data;
         })
         .finally(() => {
@@ -350,8 +371,9 @@ export class FutarchyService {
     return this.allDaosInFlight;
   }
 
-  private async fetchAllDaos(): Promise<DaoTickerData[]> {
+  private async fetchAllDaos(): Promise<{ data: DaoTickerData[]; readAt: number }> {
     try {
+      const readAt = Date.now();
       let daoAccounts: any[];
       try {
         daoAccounts = await this.retryWithBackoff(() => this.client.futarchy.account.dao.all());
@@ -442,7 +464,7 @@ export class FutarchyService {
         );
       }
 
-      return validDaoData;
+      return { data: validDaoData, readAt };
     } catch (error) {
       logger.error('Error fetching all DAOs:', error);
       throw error;
