@@ -114,17 +114,30 @@ function createMetricsMiddleware() {
 
     res.on('finish', () => {
       metricsService.decrementHttpRequestsInFlight();
-      const durationSeconds = (Date.now() - startTime) / 1000;
+      const durationMs = Date.now() - startTime;
       // Label by the matched route PATTERN (`/api/supply/:mintAddress/total`),
       // never the requested URL, and give unmatched requests one shared label,
       // so arbitrary URLs can't create unbounded Prometheus series.
+      const route = req.route ? routeLabel(req) : 'unmatched';
       metricsService.recordHttpRequest(
         req.method,
-        req.route ? routeLabel(req) : 'unmatched',
+        route,
         res.statusCode,
-        durationSeconds,
+        durationMs / 1000,
         req.clientTier ?? 'anon',
       );
+      // One structured line per request, so the X-Request-Id a partner quotes
+      // can be traced even when the request didn't error. Probes are mounted
+      // before this middleware and stay out of the log.
+      logger.info('HTTP request', {
+        requestId: req.requestId,
+        method: req.method,
+        path: req.originalUrl,
+        route,
+        status: res.statusCode,
+        durationMs,
+        tier: req.clientTier ?? 'anon',
+      });
     });
 
     next();
@@ -176,11 +189,6 @@ function createResponseHeadersMiddleware() {
 }
 
 /**
- * Every endpoint takes each query parameter at most once. A repeated one
- * (`?id=a&id=b`) parses to an array, which the string-typed handlers would
- * otherwise turn into a 500 or a confusing lookup.
- */
-/**
  * Answer 503 REQUEST_TIMEOUT when a handler hasn't responded within
  * `requestTimeout`, so a client gets a clear, retryable error instead of a
  * hung connection. The handler keeps running; anything it writes later is
@@ -206,6 +214,11 @@ function createRequestTimeoutMiddleware() {
   };
 }
 
+/**
+ * Every endpoint takes each query parameter at most once. A repeated one
+ * (`?id=a&id=b`) parses to an array, which the string-typed handlers would
+ * otherwise turn into a 500 or a confusing lookup.
+ */
 function rejectRepeatedQueryParams(req: Request, _res: Response, next: NextFunction): void {
   for (const [key, value] of Object.entries(req.query)) {
     if (typeof value !== 'string') {

@@ -1,6 +1,7 @@
 import pg from 'pg';
 import { config } from '../config.js';
 import { logger } from '../utils/logger.js';
+import { TtlCache } from '../utils/ttlCache.js';
 
 // Force pg to serialize Date parameters as ISO-8601 UTC strings so PostgreSQL
 // doesn't receive un-parseable local-timezone names like "GMT-0700".
@@ -44,6 +45,11 @@ export class ExternalDatabaseService {
   private consecutiveFailures: number = 0;
   private pingWork: Promise<void> | null = null;
   private pingClient: pg.PoolClient | null = null;
+  // Aggregates read by every /api/tickers and /cmc/* request. Concurrent
+  // callers share one in-flight query and its result is reused for
+  // CACHE_SERVED_METRICS_TTL, so a burst of pollers costs one query, not one
+  // per request against a 5-connection pool. Failures are never cached.
+  private aggregateCache = new TtlCache(100);
 
   private static readonly HEALTH_CHECK_INTERVAL_MS = 60_000;
   private static readonly MAX_FAILURES_BEFORE_RECONNECT = 3;
@@ -99,6 +105,10 @@ export class ExternalDatabaseService {
     if (tokens.length === 0) {
       return new Map();
     }
+    return this.cachedAggregate(`spot24h:${[...tokens].sort().join(',')}`, () => this.fetchSpotRolling24hMetrics(tokens));
+  }
+
+  private async fetchSpotRolling24hMetrics(tokens: string[]): Promise<Map<string, Rolling24hMetrics>> {
     if (!this.pool || !this.isConnected) {
       throw new Error('External database not connected');
     }
@@ -180,6 +190,10 @@ export class ExternalDatabaseService {
     if (tokens.length === 0) {
       return new Map();
     }
+    return this.cachedAggregate(`reserves24h:${[...tokens].sort().join(',')}`, () => this.fetchSpotReserves24hAgo(tokens));
+  }
+
+  private async fetchSpotReserves24hAgo(tokens: string[]): Promise<Map<string, { baseReserves: string; quoteReserves: string }>> {
     if (!this.pool || !this.isConnected) {
       throw new Error('External database not connected');
     }
@@ -411,6 +425,10 @@ export class ExternalDatabaseService {
    * Map<token(base mint), 'YYYY-MM-DD'>. Throws on connection or query failure.
    */
   async getFirstTradeDates(): Promise<Map<string, string>> {
+    return this.cachedAggregate('firstTradeDates', () => this.fetchFirstTradeDates());
+  }
+
+  private async fetchFirstTradeDates(): Promise<Map<string, string>> {
     if (!this.pool || !this.isConnected) {
       throw new Error('External database not connected');
     }
@@ -454,6 +472,10 @@ export class ExternalDatabaseService {
       latestSwapAt: new Date(row.latest_swap_at).toISOString(),
       ageSeconds: Number(row.age_seconds),
     };
+  }
+
+  private cachedAggregate<T>(key: string, load: () => Promise<T>): Promise<T> {
+    return this.aggregateCache.getOrLoad(key, config.cache.servedMetricsTTL, load);
   }
 
   async checkServedDataContract(): Promise<ServedDataContractStatus> {
