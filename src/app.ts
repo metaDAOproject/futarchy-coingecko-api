@@ -1,4 +1,6 @@
 import express, { type Request, type Response, type NextFunction } from 'express';
+import compression from 'compression';
+import { createHash } from 'crypto';
 import type { Application } from 'express';
 import { requestIdMiddleware } from './middleware/requestId.js';
 import { errorHandler, asyncHandler, AppError } from './middleware/errorHandler.js';
@@ -8,6 +10,7 @@ import { logger } from './utils/logger.js';
 import { createApiRoutes, createInfraRoutes } from './routes/index.js';
 import { createProbeRouter } from './routes/health.js';
 import { createServiceGetters, type Services } from './routes/types.js';
+import { createRateLimitStore, type RateLimitStore } from './utils/rateLimitStore.js';
 
 export type { Services } from './routes/types.js';
 
@@ -21,26 +24,14 @@ declare global {
 
 export interface AppOptions {
   services: Services;
+  /** Defaults to Redis when RATE_LIMIT_REDIS_URL is set, else per-process. */
+  rateLimitStore?: RateLimitStore;
 }
 
-function createRateLimitMiddleware() {
-  const buckets = new Map<string, { count: number; resetTime: number }>();
-
-  // Evict expired buckets so the map doesn't grow without bound across
-  // distinct client IPs/keys. unref() keeps the sweep from holding the
-  // process (or test runner) open.
-  const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
-  const sweep = setInterval(() => {
-    const now = Date.now();
-    for (const [key, bucket] of buckets) {
-      if (now > bucket.resetTime) buckets.delete(key);
-    }
-  }, SWEEP_INTERVAL_MS);
-  sweep.unref?.();
-
+function createRateLimitMiddleware(store: RateLimitStore) {
   let warnedAboutProxy = false;
 
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     // Behind a proxy with TRUST_PROXY_HOPS=0, req.ip is the proxy's address, so
     // every anonymous client shares ONE rate-limit bucket — a handful of
     // pollers would 429 everyone. Surface the misconfiguration once.
@@ -58,7 +49,8 @@ function createRateLimitMiddleware() {
         throw AppError.unauthorized('Invalid API key', 'INVALID_API_KEY');
       }
       tier = config.server.trustedRateLimit;
-      bucketKey = `key:${apiKey}`;
+      // Hashed, so the shared store (Redis) never holds partner keys.
+      bucketKey = `key:${createHash('sha256').update(apiKey).digest('hex')}`;
       req.clientTier = 'trusted';
     } else {
       tier = config.server.rateLimit;
@@ -66,27 +58,19 @@ function createRateLimitMiddleware() {
       req.clientTier = 'anon';
     }
 
-    const now = Date.now();
-    let limit = buckets.get(bucketKey);
-    if (!limit || now > limit.resetTime) {
-      limit = { count: 0, resetTime: now + tier.windowMs };
-      buckets.set(bucketKey, limit);
-    }
+    const { count, resetTime } = await store.hit(bucketKey, tier.windowMs);
 
     // IETF RateLimit header fields, so clients can pace themselves.
-    const resetSeconds = Math.max(0, Math.ceil((limit.resetTime - now) / 1000));
+    const resetSeconds = Math.max(0, Math.ceil((resetTime - Date.now()) / 1000));
     res.setHeader('RateLimit-Limit', tier.maxRequests);
     res.setHeader('RateLimit-Reset', resetSeconds);
+    res.setHeader('RateLimit-Remaining', Math.max(0, tier.maxRequests - count));
 
-    if (limit.count >= tier.maxRequests) {
-      res.setHeader('RateLimit-Remaining', 0);
+    if (count > tier.maxRequests) {
       res.setHeader('Retry-After', resetSeconds);
       res.status(429).json({ error: 'Too many requests', code: 'RATE_LIMITED', requestId: req.requestId });
       return;
     }
-
-    limit.count++;
-    res.setHeader('RateLimit-Remaining', tier.maxRequests - limit.count);
     next();
   };
 }
@@ -244,6 +228,9 @@ export function createApp(options: AppOptions): Application {
 
   app.use(requestIdMiddleware);
   app.use(createResponseHeadersMiddleware());
+  // gzip/brotli/deflate per Accept-Encoding for bodies over 1 KB. Market-data
+  // and DexScreener event responses are large, highly repetitive JSON.
+  app.use(compression());
   app.use(createRequestTimeoutMiddleware());
 
   // Container probes BEFORE metrics and the rate limiter (see createProbeRouter).
@@ -251,7 +238,7 @@ export function createApp(options: AppOptions): Application {
 
   // Metrics BEFORE the rate limiter so 429/401 responses are recorded too.
   app.use(createMetricsMiddleware());
-  app.use(createRateLimitMiddleware());
+  app.use(createRateLimitMiddleware(options.rateLimitStore ?? createRateLimitStore()));
   // After metrics and rate limiting, so rejected requests are counted and
   // spend quota like any other.
   app.use(rejectRepeatedQueryParams);

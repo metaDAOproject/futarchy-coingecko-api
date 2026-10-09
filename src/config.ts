@@ -54,6 +54,9 @@ export const config = {
       windowMs: 60000, // 1 minute
       maxRequests: 60, // 60 requests per minute
     },
+    // Shared rate-limit counters (redis:// or rediss://). Unset: each replica
+    // counts on its own, so N replicas allow N× the published limits.
+    rateLimitRedisUrl: process.env.RATE_LIMIT_REDIS_URL || '',
     trustedApiKeys: new Set<string>(
       (process.env.TRUSTED_API_KEYS || '')
         .split(',')
@@ -100,6 +103,12 @@ export const config = {
     // Protocol fee rate (0.005 = 0.5%); used to report fee bps on DexScreener routes.
     protocolFeeRate: fractionEnv('PROTOCOL_FEE_RATE', 0.005),
   },
+  marketData: {
+    // Max inclusive days one /api/market-data request may span (366 = a full
+    // leap year). Bounds the response size and the served-DB scan per request;
+    // longer histories are fetched in several ranges. 0 disables the cap.
+    maxRangeDays: intEnv('MARKET_DATA_MAX_RANGE_DAYS', 366),
+  },
   coinmarketcap: {
     // Optional allowlist of base-mint addresses exposed on the CoinMarketCap
     // routes. Empty (the default) means "serve every discovered DAO", matching
@@ -138,6 +147,11 @@ export const config = {
     // query can't hold one of the pool's 5 connections after its request has
     // already timed out (SERVER_REQUEST_TIMEOUT, 30s). 0 disables it.
     statementTimeoutMs: intEnv('DATABASE_PG_STATEMENT_TIMEOUT_MS', 25000),
+    // /api/tickers and /cmc/summary|ticker answer 503 SERVED_DATA_STALE when
+    // the newest indexed swap is older than this (seconds), instead of serving
+    // 24h volume that drains to zero behind a stalled ETL. Same default as the
+    // heartbeat's stale-data alert. 0 disables the guard.
+    maxDataAgeSeconds: intEnv('SERVED_DATA_MAX_AGE_SECONDS', 21600),
   },
   metrics: {
     // When set, GET /metrics requires `Authorization: Bearer <token>`.

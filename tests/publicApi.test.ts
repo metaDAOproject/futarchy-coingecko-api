@@ -37,6 +37,19 @@ describe('Public API surface', () => {
     }
   });
 
+  it('compresses large responses for clients that accept it, and leaves small ones alone', async () => {
+    const large = await request(app).get('/openapi.json').set('Accept-Encoding', 'gzip');
+    const small = await request(app).get('/health').set('Accept-Encoding', 'gzip');
+    const identity = await request(app).get('/openapi.json').set('Accept-Encoding', 'identity');
+
+    expect(large.status).toBe(200);
+    expect(large.headers['content-encoding']).toBe('gzip');
+    expect(large.headers['vary']).toContain('Accept-Encoding');
+    expect(large.body.openapi).toBe('3.1.0');
+    expect(small.headers['content-encoding']).toBeUndefined();
+    expect(identity.headers['content-encoding']).toBeUndefined();
+  });
+
   it('rejects a repeated query parameter with 400 instead of failing on an array', async () => {
     const res = await request(app).get('/dexscreener/asset?id=a&id=b');
 

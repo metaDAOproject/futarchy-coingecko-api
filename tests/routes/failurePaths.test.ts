@@ -99,6 +99,31 @@ describe('Financial endpoint failure paths (infra failure → 5xx, never fake da
     });
   });
 
+  describe('stale served data (stalled ETL)', () => {
+    for (const path of ['/api/tickers', '/cmc/summary', '/cmc/ticker']) {
+      it(`${path} returns 503 SERVED_DATA_STALE instead of draining 24h volume`, async () => {
+        for (const ageSeconds of [7 * 3600, null]) {
+          const externalDatabaseService = failingExtDb({
+            getServedDataFreshness: async () => ({ latestSwapAt: ageSeconds ? '2026-10-08T00:00:00.000Z' : null, ageSeconds }),
+          });
+          const res = await request(createTestApp({ externalDatabaseService })).get(path);
+
+          expect(res.status).toBe(503);
+          expect(res.body.code).toBe('SERVED_DATA_STALE');
+        }
+      });
+    }
+
+    it('returns 5xx when the freshness check itself fails', async () => {
+      const externalDatabaseService = failingExtDb({
+        getServedDataFreshness: async () => { throw new Error('query failed'); },
+      });
+      const res = await request(createTestApp({ externalDatabaseService })).get('/api/tickers');
+
+      expect(res.status).toBeGreaterThanOrEqual(500);
+    });
+  });
+
   describe('/api/market-data', () => {
     it('returns 500 when the daily-activity query fails, with no partial data', async () => {
       const externalDatabaseService = failingExtDb({

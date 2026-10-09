@@ -82,7 +82,14 @@ Returns all DAO tickers with pricing, volume, and liquidity information. Automat
 | `startDate` | First trade date for the token |
 
 **Volume source**: `futarchy.user_pool_spot_ohlcv` in the served ETL DB. If the
-served DB is unavailable, the endpoint returns `503` instead of reporting zero volume.
+served DB is unavailable, the endpoint returns `503 SERVED_DB_UNAVAILABLE` instead of
+reporting zero volume.
+
+**Stale data**: if the newest indexed swap is older than `SERVED_DATA_MAX_AGE_SECONDS`
+(default 6h), `/api/tickers`, `/cmc/summary` and `/cmc/ticker` return
+`503 SERVED_DATA_STALE`. A stalled ETL would otherwise serve rolling-24h volume that
+drains toward zero while looking healthy; with a 503, pollers keep their last good
+data and the alert fires.
 
 ---
 
@@ -306,8 +313,9 @@ Returns swap events in the given Solana slot range (both inclusive). Events are 
 Returns daily market data for the given date range, split by Futarchy AMM and Meteora sources.
 
 Both dates are required, must be real calendar dates, and `startDate` must be on
-or before `endDate`. `tokens` is optional: up to 100 comma-separated base-token
-mint addresses. Anything else is a `400 INVALID_QUERY_PARAMETER` naming the
+or before `endDate`, and the range may span at most `MARKET_DATA_MAX_RANGE_DAYS`
+(default 366) days, so fetch longer histories in several requests. `tokens` is
+optional: up to 100 comma-separated base-token mint addresses. Anything else is a `400 INVALID_QUERY_PARAMETER` naming the
 `field`, returned before the database is touched.
 
 **Data source**: both FutarchyAMM and Meteora data come from the unified
@@ -472,6 +480,9 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing. Keep it + 15s under the container's termination grace period | `10000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | `CACHE_SERVED_METRICS_TTL` | Reuse window (ms) for the served-DB aggregates behind `/api/tickers` and `/cmc/*` (24h volume, 24h-ago reserves, first-trade dates). Concurrent requests share one query; failures are never cached. `0` only coalesces concurrent queries | `30000` |
+| `RATE_LIMIT_REDIS_URL` | `redis://` / `rediss://` URL for rate-limit counters shared by every replica. Unset: each replica counts on its own (N replicas allow N× the limits). If Redis becomes unreachable or slow (>250ms), requests fall back to per-process counting and it reconnects automatically | — |
+| `SERVED_DATA_MAX_AGE_SECONDS` | `/api/tickers` and `/cmc/summary`/`/cmc/ticker` return `503 SERVED_DATA_STALE` when the newest indexed swap is older than this. `0` disables | `21600` |
+| `MARKET_DATA_MAX_RANGE_DAYS` | Max inclusive days per `/api/market-data` request. `0` disables | `366` |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARN` or `ERROR`. `INFO` writes one structured access-log line per request (probes and `/metrics` excluded) | `INFO` |
 | **Served indexer DB (required — the only database this API uses)** | | |
 | `DATABASE_PG_URL` | Read-only connection to the served indexer DB (Meteora, tickers, DexScreener, first-trade-dates). **Required** — `/api/market-data`, `/api/tickers`, `/cmc/summary`, `/cmc/ticker`, and the DexScreener routes return 503 without it. | — |
@@ -555,14 +566,22 @@ The DexScreener adapter reads **directly from the external indexer DB** (`v0_6_s
   and `RateLimit-Reset` (seconds) headers; a `429` also carries `Retry-After`.
 - If requests arrive with `X-Forwarded-For` while `TRUST_PROXY_HOPS=0`, the API
   logs a one-time warning, since every client then shares the proxy's bucket.
+- **Multiple replicas:** set `RATE_LIMIT_REDIS_URL` so the limits above hold for
+  the whole deployment. Without it, each replica counts on its own. Trusted
+  keys are stored in Redis only as SHA-256 hashes. Rate limiting never takes the
+  API down: if Redis is unreachable or slow, each replica counts on its own until
+  Redis recovers.
 
-## Caching and CORS
+## Caching, Compression and CORS
 
 - Successful data responses send `Cache-Control: private, max-age=30`
   (`CACHE_CONTROL_MAX_AGE`), so a client can reuse a response for 30s. It's
   `private`, not `public`, because responses carry per-caller headers
   (`RateLimit-*`, `X-Request-Id`) that a shared cache would replay to other
   callers. Errors, health, probe and metrics responses send `no-store`.
+- Responses over 1 KB are compressed (`br`, `gzip` or `deflate`) when the client
+  sends `Accept-Encoding` (`Vary: Accept-Encoding` is set). JSON feeds shrink
+  about 85% (the OpenAPI spec goes from 68 KB to 10 KB).
 - CORS is open for read-only use: any origin, `GET`/`OPTIONS`, and the
   `X-API-Key` and `X-Request-Id` request headers. Preflight `OPTIONS` requests
   are answered directly with `204` and don't count toward the rate limit.
@@ -595,7 +614,7 @@ reporting a problem.
 | `404` | Not Found (unknown routes also answer in this JSON shape, `code: "NOT_FOUND"`) |
 | `429` | Rate limit exceeded |
 | `503` | `code: "REQUEST_TIMEOUT"` when the response took longer than `SERVER_REQUEST_TIMEOUT` |
-| `503` | `SERVED_DB_UNAVAILABLE` (served DB not connected) and other dependency outages |
+| `503` | `SERVED_DB_UNAVAILABLE` (served DB not connected), `SERVED_DATA_STALE` (ETL stalled) and other dependency outages |
 | `500` | `INTERNAL_ERROR` (unexpected server or upstream RPC/DB failure); retry later |
 
 ## License

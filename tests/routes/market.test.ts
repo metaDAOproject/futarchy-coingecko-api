@@ -45,6 +45,7 @@ describe('Market Routes', () => {
       ['startDate is not a calendar date', { startDate: '2024-02-31', endDate: '2024-03-15' }, 'startDate'],
       ['startDate is after endDate', { startDate: '2024-02-01', endDate: '2024-01-01' }, 'startDate'],
       ['a token is not a mint address', { startDate: '2024-01-01', endDate: '2024-01-15', tokens: 'ZKFG' }, 'tokens'],
+      ['the range spans more than 366 days', { startDate: '2024-01-01', endDate: '2025-01-01' }, 'endDate'],
     ])('returns 400 when %s', async (_case, query, field) => {
       const response = await request(app).get('/api/market-data').query(query);
       expect(response.status).toBe(400);
@@ -98,6 +99,11 @@ describe('Market Routes', () => {
       expect(met.target_volume).toBe('500');
       expect(met.usdc_fees).toBe('2');
       expect(met.token_per_usdc).toBe('0.1');
+    });
+
+    it('accepts a range of exactly 366 days (a full leap year)', async () => {
+      const response = await request(app).get('/api/market-data').query({ startDate: '2024-01-01', endDate: '2024-12-31' });
+      expect(response.status).toBe(200);
     });
 
     it('passes the tokens filter through to the response envelope', async () => {

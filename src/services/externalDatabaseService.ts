@@ -455,6 +455,14 @@ export class ExternalDatabaseService {
    * Throws on connection or query failure.
    */
   async getServedDataFreshness(): Promise<ServedDataFreshness> {
+    // Read by every 24h-volume request (stale-data guard) as well as the
+    // heartbeat and /api/health; MAX(block_time) over every swap is not free.
+    // ageSeconds can be up to CACHE_SERVED_METRICS_TTL behind, far below the
+    // hours-scale thresholds it is compared against.
+    return this.cachedAggregate('freshness', () => this.fetchServedDataFreshness());
+  }
+
+  private async fetchServedDataFreshness(): Promise<ServedDataFreshness> {
     if (!this.pool || !this.isConnected) {
       throw new Error('External database not connected');
     }
