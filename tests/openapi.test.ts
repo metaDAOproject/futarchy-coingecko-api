@@ -10,7 +10,9 @@ type Json = unknown;
 
 const spec = openApiSpec as unknown as {
   openapi: string;
-  paths: Record<string, Record<string, {
+  paths: Record<string, {
+    servers?: Array<{ url: string }>;
+  } & Record<string, {
     operationId?: string;
     parameters?: Array<{ $ref?: string; name?: string; in?: string; required?: boolean }>;
   }>>;
@@ -76,7 +78,11 @@ function operations() {
           return `${encodeURIComponent(p.name)}=${encodeURIComponent(sample)}`;
         });
       if (query.length > 0) url += `?${query.join('&')}`;
-      ops.push({ key: `${method.toUpperCase()} ${path}`, method, url });
+      // Each documented server prefix (e.g. /v1 and / for data endpoints) must serve it.
+      const prefixes = (item.servers ?? [{ url: '/' }]).map((s) => s.url.replace(/\/$/, ''));
+      for (const prefix of prefixes) {
+        ops.push({ key: `${method.toUpperCase()} ${prefix}${path}`, method, url: prefix + url });
+      }
     }
   }
   return ops;

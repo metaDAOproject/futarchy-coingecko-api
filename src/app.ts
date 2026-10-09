@@ -5,7 +5,7 @@ import { errorHandler, asyncHandler, AppError } from './middleware/errorHandler.
 import { metricsService } from './services/metricsService.js';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
-import { createRoutes } from './routes/index.js';
+import { createApiRoutes, createInfraRoutes } from './routes/index.js';
 import { createProbeRouter } from './routes/health.js';
 import { createServiceGetters, type Services } from './routes/types.js';
 
@@ -91,6 +91,17 @@ function createRateLimitMiddleware() {
   };
 }
 
+/**
+ * Bounded metrics label for a matched request: its API version prefix (from
+ * the URL, since Express has restored `req.baseUrl` by the time an error
+ * response finishes) plus the matched route pattern. Keeps /v1 and
+ * unversioned traffic distinguishable for deprecation decisions.
+ */
+function routeLabel(req: Request): string {
+  const version = req.originalUrl.match(/^\/v\d+(?=[/?]|$)/)?.[0] ?? '';
+  return version + [req.route.path].flat().join('|');
+}
+
 function createMetricsMiddleware() {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (req.path === '/metrics') {
@@ -109,7 +120,7 @@ function createMetricsMiddleware() {
       // so arbitrary URLs can't create unbounded Prometheus series.
       metricsService.recordHttpRequest(
         req.method,
-        req.route ? req.baseUrl + [req.route.path].flat().join('|') : 'unmatched',
+        req.route ? routeLabel(req) : 'unmatched',
         res.statusCode,
         durationSeconds,
         req.clientTier ?? 'anon',
@@ -232,8 +243,10 @@ export function createApp(options: AppOptions): Application {
   // spend quota like any other.
   app.use(rejectRepeatedQueryParams);
 
-  // Mount all routes
-  app.use(createRoutes(serviceGetters));
+  // Health/metrics/index are operational and unversioned; the data API is
+  // served under /v1 plus the legacy unversioned alias (see routes/index.ts).
+  app.use(createInfraRoutes(serviceGetters));
+  app.use(createApiRoutes(serviceGetters));
 
   // JSON 404 (Express's default is an HTML page) in the same shape as errors.
   app.use((req: Request, res: Response) => {

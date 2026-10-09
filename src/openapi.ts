@@ -128,6 +128,13 @@ const futarchyActivityRowProperties = futarchyActivityProperties();
 // The spec
 // ---------------------------------------------------------------------------
 
+// Data endpoints are served under /v1 and, unchanged, at the unversioned path
+// (a frozen alias of v1). Operational endpoints are only at the root.
+const VERSIONED_SERVERS = [
+  { url: '/v1', description: 'Versioned (recommended for new integrations)' },
+  { url: '/', description: 'Unversioned alias of v1, kept for existing integrations' },
+];
+
 export const openApiSpec = {
   openapi: '3.1.0',
   info: {
@@ -135,6 +142,8 @@ export const openApiSpec = {
     version: '2.0.0',
     description: [
       'Public, read-only HTTP API serving Futarchy protocol DEX data (FutarchyAMM spot markets, plus Meteora pools for daily market data) to aggregators such as CoinGecko, CoinMarketCap, DexScreener and Jupiter, and to dashboards.',
+      '',
+      '**Versioning.** Every data endpoint is served under `/v1` (e.g. `/v1/api/tickers`) and, unchanged, at its unversioned path, which is a frozen alias of v1. Health, probe, metrics and docs endpoints are not versioned. Breaking changes ship as a new version prefix. A deprecated version answers with `Deprecation` (RFC 9745), `Sunset` (RFC 8594) and `Link: <…>; rel="successor-version"` headers.',
       '',
       '**Units.** Token amounts, prices and volumes are in human units (already divided by the mint decimals). Most adapters serve them as decimal strings; fields suffixed `Raw` are integer strings in base units. Adapters whose consumer requires JSON numbers (CoinMarketCap, DexScreener, the Jupiter supply endpoints) serve numbers, as noted per schema.',
       '',
@@ -211,6 +220,7 @@ export const openApiSpec = {
 
     // ------------------------------------------------------------- CoinGecko
     '/api/tickers': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCoinGeckoTickers',
         summary: 'CoinGecko tickers',
@@ -226,6 +236,7 @@ export const openApiSpec = {
 
     // ----------------------------------------------------------- Market data
     '/api/market-data': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getMarketData',
         summary: 'Daily market data',
@@ -272,6 +283,7 @@ export const openApiSpec = {
 
     // ---------------------------------------------------------------- Supply
     '/api/supply/{mintAddress}': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getSupply',
         summary: 'Supply breakdown',
@@ -286,6 +298,7 @@ export const openApiSpec = {
       },
     },
     '/api/supply/{mintAddress}/total': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getTotalSupply',
         summary: 'Total supply',
@@ -299,6 +312,7 @@ export const openApiSpec = {
       },
     },
     '/api/supply/{mintAddress}/circulating': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCirculatingSupply',
         summary: 'Circulating supply',
@@ -313,6 +327,7 @@ export const openApiSpec = {
       },
     },
     '/api/supply/{mintAddress}/jupiter/circulating': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getJupiterCirculatingSupply',
         summary: 'Circulating supply (Jupiter format)',
@@ -326,6 +341,7 @@ export const openApiSpec = {
       },
     },
     '/api/supply/{mintAddress}/jupiter/total': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getJupiterTotalSupply',
         summary: 'Total supply (Jupiter format)',
@@ -341,6 +357,7 @@ export const openApiSpec = {
 
     // -------------------------------------------------------------- Launches
     '/api/launches/live': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getLiveLaunches',
         summary: 'Live launches',
@@ -356,6 +373,7 @@ export const openApiSpec = {
 
     // --------------------------------------------------------- CoinMarketCap
     '/cmc/summary': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCmcSummary',
         summary: 'CoinMarketCap summary',
@@ -369,6 +387,7 @@ export const openApiSpec = {
       },
     },
     '/cmc/ticker': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCmcTicker',
         summary: 'CoinMarketCap ticker',
@@ -382,6 +401,7 @@ export const openApiSpec = {
       },
     },
     '/cmc/assets': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCmcAssets',
         summary: 'CoinMarketCap assets',
@@ -395,6 +415,7 @@ export const openApiSpec = {
       },
     },
     '/cmc/v1/summary': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCmcV1Summary',
         summary: 'CoinMarketCap summary (v1)',
@@ -408,6 +429,7 @@ export const openApiSpec = {
       },
     },
     '/cmc/v1/ticker': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCmcV1Ticker',
         summary: 'CoinMarketCap ticker (v1)',
@@ -421,6 +443,7 @@ export const openApiSpec = {
       },
     },
     '/cmc/v1/assets': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getCmcV1Assets',
         summary: 'CoinMarketCap assets (v1)',
@@ -436,6 +459,7 @@ export const openApiSpec = {
 
     // ----------------------------------------------------------- DexScreener
     '/dexscreener/latest-block': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getDexScreenerLatestBlock',
         summary: 'Latest indexed block',
@@ -453,6 +477,7 @@ export const openApiSpec = {
       },
     },
     '/dexscreener/asset': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getDexScreenerAsset',
         summary: 'Asset metadata',
@@ -477,6 +502,7 @@ export const openApiSpec = {
       },
     },
     '/dexscreener/pair': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getDexScreenerPair',
         summary: 'Pair metadata',
@@ -502,6 +528,7 @@ export const openApiSpec = {
       },
     },
     '/dexscreener/events': {
+      servers: VERSIONED_SERVERS,
       get: {
         operationId: 'getDexScreenerEvents',
         summary: 'Swap events by block range',

@@ -1,6 +1,7 @@
 import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import { config } from '../config.js';
+import { createSolanaConnection } from '../utils/solanaConnection.js';
 import BN from 'bn.js';
 import { retry, isTransientError, createRetryLogger } from '../utils/resilience.js';
 import { logger } from '../utils/logger.js';
@@ -91,7 +92,7 @@ export class SolanaService {
   private cache: Map<string, { data: any; timestamp: number }>;
 
   constructor() {
-    this.connection = new Connection(config.solana.rpcUrl, 'confirmed');
+    this.connection = createSolanaConnection();
     this.cache = new Map();
   }
 

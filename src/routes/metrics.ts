@@ -15,19 +15,14 @@ function hasMetricsToken(req: Request): boolean {
 
 export function createMetricsRouter(services: ServiceGetters): Router {
   const router = Router();
-  const { getExternalDatabaseService, getFutarchyService } = services;
+  const { getExternalDatabaseService } = services;
 
   // Refresh scrape-time gauges. The heartbeat keeps these up to date too; this
   // just guarantees a scrape never reads values older than the last heartbeat.
-  async function updateMetricsSnapshot(): Promise<void> {
+  // DAO gauges are set when a snapshot refresh succeeds — a scrape must never
+  // trigger an on-chain scan (the endpoint may be publicly reachable).
+  function updateMetricsSnapshot(): void {
     metricsService.setServedDbConnected(!!getExternalDatabaseService()?.isAvailable());
-
-    try {
-      const daos = await getFutarchyService().getAllDaos();
-      metricsService.setActiveDaosCount(daos.length);
-    } catch {
-      // Ignore errors during metrics collection
-    }
   }
 
   // Prometheus metrics endpoint
@@ -38,7 +33,7 @@ export function createMetricsRouter(services: ServiceGetters): Router {
       return;
     }
     try {
-      await updateMetricsSnapshot();
+      updateMetricsSnapshot();
 
       res.set('Content-Type', metricsService.getContentType());
       res.end(await metricsService.getMetrics());

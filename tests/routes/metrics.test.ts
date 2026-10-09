@@ -39,6 +39,14 @@ describe('Metrics Routes', () => {
       expect(response.text).not.toContain('aaa111');
     });
 
+    it('keeps the API version in the label, so /v1 and unversioned traffic stay distinguishable', async () => {
+      await request(app).get('/v1/api/supply/ccc333/total');
+      const response = await request(app).get('/metrics');
+
+      expect(response.text).toContain('path="/v1/api/supply/:mintAddress/total"');
+      expect(response.text).not.toContain('ccc333');
+    });
+
     it('should expose the served DB connectivity gauge', async () => {
       const response = await request(app).get('/metrics');
 
