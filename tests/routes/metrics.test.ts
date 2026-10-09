@@ -30,6 +30,14 @@ describe('Metrics Routes', () => {
       expect(response.text).not.toContain('scan-xyz');
     });
 
+    it('labels matched requests by route pattern, never by the requested URL', async () => {
+      await request(app).get('/api/supply/aaa111/total'); // matches :mintAddress, then 400s
+      const response = await request(app).get('/metrics');
+
+      expect(response.text).toContain('path="/api/supply/:mintAddress/total"');
+      expect(response.text).not.toContain('aaa111');
+    });
+
     it('should expose the served DB connectivity gauge', async () => {
       const response = await request(app).get('/metrics');
 

@@ -104,11 +104,12 @@ function createMetricsMiddleware() {
     res.on('finish', () => {
       metricsService.decrementHttpRequestsInFlight();
       const durationSeconds = (Date.now() - startTime) / 1000;
-      // Unmatched requests (404 scans of arbitrary paths) share one label so
-      // they can't create unbounded Prometheus series.
+      // Label by the matched route PATTERN (`/api/supply/:mintAddress/total`),
+      // never the requested URL, and give unmatched requests one shared label,
+      // so arbitrary URLs can't create unbounded Prometheus series.
       metricsService.recordHttpRequest(
         req.method,
-        req.route ? req.originalUrl.split('?')[0]! : 'unmatched',
+        req.route ? req.baseUrl + [req.route.path].flat().join('|') : 'unmatched',
         res.statusCode,
         durationSeconds,
         req.clientTier ?? 'anon',
@@ -120,14 +121,17 @@ function createMetricsMiddleware() {
 }
 
 // Operational endpoints whose responses must never be cached.
-const UNCACHEABLE_PATH = /^\/(health|metrics)(\/|$)|^\/api\/health$/;
+// Case-insensitive with optional trailing slash, matching Express's routing.
+const UNCACHEABLE_PATH = /^\/(health|metrics)(\/|$)|^\/api\/health\/?$/i;
 
 /**
  * Response headers every public response gets: CORS (read-only, any origin),
- * nosniff, and Cache-Control decided when the status is known — successful
- * data GETs are cacheable for `cacheMaxAgeSeconds`, everything else (errors,
- * health, metrics) is no-store so a CDN never pins an outage. A route can
- * still set its own Cache-Control.
+ * nosniff, and Cache-Control decided when the status is known: successful
+ * data GETs are `private` (client-side cache only) for `cacheMaxAgeSeconds`,
+ * everything else (errors, health, metrics) is no-store. `private`, not
+ * `public`, because responses carry per-caller headers (RateLimit-*,
+ * X-Request-Id) that a shared cache would replay to other callers. A route
+ * can still set its own Cache-Control.
  */
 function createResponseHeadersMiddleware() {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -144,7 +148,7 @@ function createResponseHeadersMiddleware() {
         const cacheable = req.method === 'GET' && status >= 200 && status < 300
           && !UNCACHEABLE_PATH.test(req.originalUrl.split('?')[0]!);
         res.setHeader('Cache-Control', cacheable
-          ? `public, max-age=${config.server.cacheMaxAgeSeconds}`
+          ? `private, max-age=${config.server.cacheMaxAgeSeconds}`
           : 'no-store');
       }
       return (writeHead as (...a: unknown[]) => Response).apply(this, args);
@@ -190,7 +194,6 @@ export function createApp(options: AppOptions): Application {
 
   app.use(requestIdMiddleware);
   app.use(createResponseHeadersMiddleware());
-  app.use(rejectRepeatedQueryParams);
 
   // Container probes BEFORE metrics and the rate limiter (see createProbeRouter).
   app.use(createProbeRouter(serviceGetters));
@@ -198,6 +201,9 @@ export function createApp(options: AppOptions): Application {
   // Metrics BEFORE the rate limiter so 429/401 responses are recorded too.
   app.use(createMetricsMiddleware());
   app.use(createRateLimitMiddleware());
+  // After metrics and rate limiting, so rejected requests are counted and
+  // spend quota like any other.
+  app.use(rejectRepeatedQueryParams);
 
   // Mount all routes
   app.use(createRoutes(serviceGetters));

@@ -426,7 +426,7 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
 | `CACHE_CONTROL_MAX_AGE` | `Cache-Control` max-age (seconds) on successful data responses | `30` |
-| `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing | `5000` |
+| `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing. Keep it + 15s under the container's termination grace period | `10000` |
 | `CACHE_TICKERS_TTL` | On-chain data cache TTL (ms) | `55000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | **Served indexer DB (required — the only database this API uses)** | | |
@@ -513,9 +513,11 @@ The DexScreener adapter reads **directly from the external indexer DB** (`v0_6_s
 
 ## Caching and CORS
 
-- Successful data responses send `Cache-Control: public, max-age=30`
-  (`CACHE_CONTROL_MAX_AGE`), so a CDN or client can absorb repeat polls. Errors,
-  health, probe and metrics responses send `no-store`.
+- Successful data responses send `Cache-Control: private, max-age=30`
+  (`CACHE_CONTROL_MAX_AGE`), so a client can reuse a response for 30s. It's
+  `private`, not `public`, because responses carry per-caller headers
+  (`RateLimit-*`, `X-Request-Id`) that a shared cache would replay to other
+  callers. Errors, health, probe and metrics responses send `no-store`.
 - CORS is open for read-only use: any origin, `GET`/`OPTIONS`, and the
   `X-API-Key` and `X-Request-Id` request headers. Preflight `OPTIONS` requests
   are answered directly with `204` and don't count toward the rate limit.

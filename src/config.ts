@@ -38,12 +38,15 @@ export const config = {
     // 0 = no proxy (req.ip is the socket peer). Use the exact hop count — a
     // blanket "trust everything" would let clients spoof their IP via XFF.
     trustProxyHops: intEnv('TRUST_PROXY_HOPS', 0),
-    // `Cache-Control: public, max-age=N` on successful data responses, so
-    // CDNs/clients can absorb repeat polls. Errors and health/metrics are no-store.
+    // `Cache-Control: private, max-age=N` on successful data responses, so
+    // clients can reuse a response for N seconds. Errors and health/metrics are no-store.
     cacheMaxAgeSeconds: intEnv('CACHE_CONTROL_MAX_AGE', 30),
     // On SIGTERM, report not-ready and keep serving this long (ms) so the load
-    // balancer stops routing here before the listener closes.
-    shutdownDrainMs: intEnv('SHUTDOWN_DRAIN_MS', 5000),
+    // balancer stops routing here before the listener closes. Kubernetes
+    // removes a terminating pod from its endpoints right away; this covers the
+    // propagation to the ingress. Keep drain + 15s close budget under the
+    // platform's termination grace period (Kubernetes default 30s).
+    shutdownDrainMs: intEnv('SHUTDOWN_DRAIN_MS', 10000),
     rateLimit: {
       windowMs: 60000, // 1 minute
       maxRequests: 60, // 60 requests per minute
