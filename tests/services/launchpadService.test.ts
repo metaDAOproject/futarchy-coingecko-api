@@ -8,10 +8,11 @@
  * bug this suite pins down).
  */
 
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, setSystemTime, afterEach } from 'bun:test';
 import { PublicKey } from '@solana/web3.js';
 import BN from 'bn.js';
 import { LaunchpadService } from '../../src/services/launchpadService.js';
+import { config } from '../../src/config.js';
 
 const MINT = new PublicKey('SoLo9oxzLDpcq1dpqAgMwgce5WqkRDtNXK7EPnbmeta');
 
@@ -59,14 +60,16 @@ describe('LaunchpadService.getLiveLaunches', () => {
   const LAUNCH = new PublicKey('5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE');
   const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
 
-  function fakeProgram(launches: any[], fundingRecords: any[] = [], calls = { count: 0 }) {
+  function fakeProgram(launches: any[], fundingRecords: any[] = [], calls = { launch: 0, fundingRecord: 0 }) {
     return {
       account: {
-        launch: { all: async () => { calls.count++; return launches; } },
-        fundingRecord: { all: async () => fundingRecords },
+        launch: { all: async () => { calls.launch++; return launches; } },
+        fundingRecord: { all: async () => { calls.fundingRecord++; return fundingRecords; } },
       },
     };
   }
+
+  afterEach(() => setSystemTime());
 
   function serviceWith(programs: { v06?: any; v07?: any; v08?: any }) {
     const svc = new LaunchpadService();
@@ -98,12 +101,13 @@ describe('LaunchpadService.getLiveLaunches', () => {
       ...liveLaunch,
       account: { ...liveLaunch.account, unixTimestampStarted: new BN(STARTED - 2 * DURATION) },
     };
+    const calls = { launch: 0, fundingRecord: 0 };
     const svc = serviceWith({
       v07: fakeProgram([liveLaunch, completed, pastClose], [
         { account: { committedAmount: new BN('1500000') } },
         { account: { committedAmount: new BN('250000000') } },
         { account: { committedAmount: new BN(0) } },
-      ]),
+      ], calls),
     });
 
     const { launches } = await svc.getLiveLaunches();
@@ -121,18 +125,38 @@ describe('LaunchpadService.getLiveLaunches', () => {
       minimumRaiseRaw: '500000000000',
       closeTime: STARTED + DURATION,
     }]);
+    // Funding records are read for the open launch only, not the expired one.
+    expect(calls.fundingRecord).toBe(1);
   });
 
-  it('serves the cached snapshot within the TTL', async () => {
-    const calls = { count: 0 };
-    const svc = serviceWith({ v08: fakeProgram([liveLaunch], [], calls) });
+  it('shares one scan per TTL window and drops launches the moment they close', async () => {
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    const closingSoon = {
+      ...liveLaunch,
+      account: {
+        ...liveLaunch.account,
+        unixTimestampStarted: new BN(Math.floor(now / 1000) - DURATION + 60),
+      },
+    };
+    const calls = { launch: 0, fundingRecord: 0 };
+    const svc = serviceWith({ v08: fakeProgram([closingSoon], [], calls) });
 
-    const first = await svc.getLiveLaunches();
-    const second = await svc.getLiveLaunches();
+    // Concurrent callers share the in-flight scan.
+    const [a, b] = await Promise.all([svc.getLiveLaunches(), svc.getLiveLaunches()]);
+    expect(a.launches).toHaveLength(1);
+    expect(b).toEqual(a);
+    expect(calls.launch).toBe(1);
 
-    expect(second).toEqual(first);
-    expect(first.launches).toHaveLength(1);
-    expect(calls.count).toBe(1);
+    // Within the TTL but past the close time: served from cache, launch filtered out.
+    setSystemTime(new Date(now + 120_000));
+    expect((await svc.getLiveLaunches()).launches).toEqual([]);
+    expect(calls.launch).toBe(1);
+
+    // After the TTL: rescanned.
+    setSystemTime(new Date(now + config.cache.liveLaunchesTTL + 1));
+    await svc.getLiveLaunches();
+    expect(calls.launch).toBe(2);
   });
 
   it('propagates RPC failures instead of serving an empty list, and does not cache them', async () => {

@@ -144,7 +144,7 @@ export class LaunchpadService {
   private cache: Map<string, { data: any; timestamp: number }>;
   private liveLaunches: { snapshot: LiveLaunchesSnapshot; fetchedAt: number } | null = null;
   private liveLaunchesInFlight: Promise<LiveLaunchesSnapshot> | null = null;
-  private mintDecimals = new Map<string, number>();
+  private mintDecimals = new Map<string, Promise<number>>();
 
   constructor() {
     this.connection = new Connection(config.solana.rpcUrl, 'confirmed');
@@ -650,11 +650,26 @@ export class LaunchpadService {
       { version: 'v0.8', program: this.clientV08.launchpad },
     ] as const;
 
+    const nowSeconds = Date.now() / 1000;
     const perProgram = await Promise.all(programs.map(async ({ version, program }) => {
       const launches = await program.account.launch.all();
-      const live = launches.filter(({ account }) => 'live' in account.state);
 
-      return Promise.all(live.map(async ({ publicKey, account }): Promise<LiveLaunch> => {
+      // Keep `live` launches whose close time hasn't passed. Expired launches
+      // stay `live` on-chain until closeLaunch is called (many never are) and
+      // would always be filtered at serve time, so don't read their funding
+      // records at all.
+      const open: Array<{ publicKey: PublicKey; account: (typeof launches)[number]['account']; closeTime: number }> = [];
+      for (const { publicKey, account } of launches) {
+        if (!('live' in account.state)) continue;
+        // A launch only enters `live` via startLaunch, which sets this timestamp.
+        if (!account.unixTimestampStarted) {
+          throw new Error(`Live ${version} launch ${publicKey.toBase58()} has no start timestamp`);
+        }
+        const closeTime = account.unixTimestampStarted.toNumber() + account.secondsForLaunch;
+        if (closeTime > nowSeconds) open.push({ publicKey, account, closeTime });
+      }
+
+      return Promise.all(open.map(async ({ publicKey, account, closeTime }): Promise<LiveLaunch> => {
         const [fundingRecords, quoteDecimals] = await Promise.all([
           program.account.fundingRecord.all([
             { memcmp: { offset: FUNDING_RECORD_LAUNCH_OFFSET, bytes: publicKey.toBase58() } },
@@ -670,11 +685,6 @@ export class LaunchpadService {
           committerCount++;
         }
 
-        // A launch only enters `live` via startLaunch, which sets this timestamp.
-        if (!account.unixTimestampStarted) {
-          throw new Error(`Live ${version} launch ${publicKey.toBase58()} has no start timestamp`);
-        }
-
         return {
           launchAddress: publicKey.toBase58(),
           version,
@@ -686,7 +696,7 @@ export class LaunchpadService {
           totalCommittedRaw: totalCommitted.toString(),
           minimumRaise: formatUnits(account.minimumRaiseAmount, quoteDecimals),
           minimumRaiseRaw: account.minimumRaiseAmount.toString(),
-          closeTime: account.unixTimestampStarted.toNumber() + account.secondsForLaunch,
+          closeTime,
         };
       }));
     }));
@@ -696,11 +706,14 @@ export class LaunchpadService {
     return { updatedAt: new Date().toISOString(), launches };
   }
 
-  private async getMintDecimals(mint: PublicKey): Promise<number> {
+  // Caches the pending lookup so launches sharing a quote mint (usually USDC)
+  // make one getMint call. A failed lookup is evicted so the next refresh retries.
+  private getMintDecimals(mint: PublicKey): Promise<number> {
     const key = mint.toBase58();
     let decimals = this.mintDecimals.get(key);
-    if (decimals === undefined) {
-      decimals = (await getMint(this.connection, mint)).decimals;
+    if (!decimals) {
+      decimals = getMint(this.connection, mint).then((info) => info.decimals);
+      decimals.catch(() => this.mintDecimals.delete(key));
       this.mintDecimals.set(key, decimals);
     }
     return decimals;
