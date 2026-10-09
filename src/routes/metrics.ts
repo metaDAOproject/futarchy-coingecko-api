@@ -1,7 +1,16 @@
 import { Router, type Request, type Response } from 'express';
+import { timingSafeEqual } from 'crypto';
+import { config } from '../config.js';
 import { metricsService } from '../services/metricsService.js';
 import type { ServiceGetters } from './types.js';
 import { logger } from '../utils/logger.js';
+
+function hasMetricsToken(req: Request): boolean {
+  const header = req.header('authorization') ?? '';
+  const supplied = Buffer.from(header.startsWith('Bearer ') ? header.slice(7) : '');
+  const expected = Buffer.from(config.metrics.token);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
 
 export function createMetricsRouter(services: ServiceGetters): Router {
   const router = Router();
@@ -22,6 +31,11 @@ export function createMetricsRouter(services: ServiceGetters): Router {
 
   // Prometheus metrics endpoint
   router.get('/metrics', async (req: Request, res: Response) => {
+    if (config.metrics.token && !hasMetricsToken(req)) {
+      res.setHeader('WWW-Authenticate', 'Bearer');
+      res.status(401).json({ error: 'Unauthorized', code: 'UNAUTHORIZED', requestId: req.requestId });
+      return;
+    }
     try {
       await updateMetricsSnapshot();
 

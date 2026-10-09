@@ -10,6 +10,7 @@ import { createLaunchesRouter } from './launches.js';
 
 import { createDexScreenerRouter } from './dexscreener.js';
 import { createRootRouter } from './root.js';
+import { createDocsRouter } from './docs.js';
 import type { ServiceGetters } from './types.js';
 
 export type { ServiceGetters } from './types.js';
@@ -25,6 +26,7 @@ export function createRoutes(services: ServiceGetters): Router {
   router.use(createMarketRouter(services));
   router.use(createLaunchesRouter(services));
   router.use(createDexScreenerRouter(services));
+  router.use(createDocsRouter());
   router.use(createRootRouter(services));
 
   return router;

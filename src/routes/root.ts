@@ -10,7 +10,8 @@ export function createRootRouter(_services: ServiceGetters): Router {
     res.json({
       name: 'Futarchy AMM - CoinGecko API',
       version: '2.0.0',
-      documentation: 'https://docs.coingecko.com/reference/exchanges-list',
+      documentation: '/docs',
+      openapi: '/openapi.json',
       endpoints: {
         tickers: '/api/tickers - Returns all DAO tickers with pricing and volume',
         market_data: '/api/market-data - Daily market data from the served user_pool ETL',

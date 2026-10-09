@@ -6,6 +6,10 @@ A multi-aggregator DEX API for the Futarchy protocol that automatically discover
 
 **Base URL:** `https://your-api-domain.com`
 
+**Reference:** `GET /docs` renders the full API reference, and `GET /openapi.json`
+serves the machine-readable OpenAPI 3.1 contract (`src/openapi.ts`). A test
+fails if the spec documents a route the app doesn't serve.
+
 ---
 
 ### CoinGecko Endpoints
@@ -351,11 +355,13 @@ on-chain state `live` with a close time in the future — read directly from Sol
 | `GET /health/live` | Liveness probe: 200 whenever the process can respond (no dependency checks) |
 | `GET /health` | Process status and uptime (no dependency checks) |
 | `GET /api/health` | Detailed status: served DB connectivity, ETL data contract, and data freshness |
-| `GET /metrics` | Prometheus metrics (HTTP, served-DB health gauges, heartbeat) |
+| `GET /metrics` | Prometheus metrics (HTTP, served-DB health gauges, heartbeat). Requires `Authorization: Bearer <METRICS_TOKEN>` when `METRICS_TOKEN` is set |
 
-`/api/health` always returns 200 and reports `status: "degraded"` (with a
-`message`) when the served DB is unreachable, the served-data contract check
-fails, or the freshness query fails. Use it for dashboards, not probes.
+`/api/health` returns `200` when healthy and `503` with `status: "degraded"`
+(and a `message`) when the served DB is unreachable, the served-data contract
+check fails, or the freshness query fails. Use it for dashboards and uptime
+monitors, not container probes. Don't point a Northflank liveness probe at it:
+a 503 there would restart containers during a DB outage.
 
 #### Container probes (Northflank)
 
@@ -421,7 +427,8 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `SOLANA_WS_URL` / `RPCPOOL_WS_URL` | Solana WebSocket endpoint | `wss://api.mainnet-beta.solana.com` |
 | **Server** | | |
 | `PORT` | Server port | `3000` |
-| `SERVER_REQUEST_TIMEOUT` | Request timeout (ms) | `300000` |
+| `SERVER_REQUEST_TIMEOUT` | Max time (ms) to respond; slower requests get `503 REQUEST_TIMEOUT` | `30000` |
+| `METRICS_TOKEN` | Bearer token required by `GET /metrics` (open, with a startup warning, when unset) | — |
 | `TRUST_PROXY_HOPS` | Reverse-proxy hops in front of the API (needed for per-IP rate limiting behind a LB) | `0` |
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
@@ -539,6 +546,7 @@ exits with an error instead of silently becoming `NaN`.
 | `401` | Unauthorized (invalid `X-API-Key`) |
 | `404` | Not Found (unknown routes also answer in this JSON shape, `code: "NOT_FOUND"`) |
 | `429` | Rate limit exceeded |
+| `503` | `code: "REQUEST_TIMEOUT"` when the response took longer than `SERVER_REQUEST_TIMEOUT` |
 | `503` | Service unavailable (DB not connected) |
 | `500` | Internal server error |
 

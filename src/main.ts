@@ -26,9 +26,15 @@ async function main(): Promise<void> {
     logger.info('Trusted API keys loaded', {
       count: config.server.trustedApiKeys.size,
     });
+
+    if (!config.metrics.token) {
+      logger.warn('METRICS_TOKEN is not set: /metrics is publicly readable. Set it and give your Prometheus scraper the bearer token.');
+    }
   });
 
-  server.timeout = config.server.requestTimeout;
+  // Backstop only: the request-timeout middleware answers 503 at
+  // requestTimeout; this closes sockets that stay silent a little longer.
+  server.timeout = config.server.requestTimeout + 5_000;
   server.keepAliveTimeout = config.server.keepAliveTimeout;
   server.headersTimeout = config.server.keepAliveTimeout + 1000;
 

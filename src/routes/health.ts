@@ -130,7 +130,9 @@ export function createHealthRouter(services: ServiceGetters): Router {
       health.message = 'Served DB freshness check failed';
     }
 
-    res.json(health);
+    // 503 when degraded, so uptime monitors and load balancers can act on the
+    // status code alone (the body still carries the details).
+    res.status(health.status === 'healthy' ? 200 : 503).json(health);
   });
 
   return router;

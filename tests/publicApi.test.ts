@@ -2,6 +2,7 @@ import { describe, it, expect } from 'bun:test';
 import request from 'supertest';
 import { createTestApp } from './helpers/testApp.js';
 import type { LaunchpadService } from '../src/services/launchpadService.js';
+import { config } from '../src/config.js';
 
 const launchpadService = {
   getLiveLaunches: async () => ({ updatedAt: '2026-10-09T00:00:00.000Z', launches: [] }),
@@ -60,5 +61,22 @@ describe('Public API surface', () => {
 
     expect(safe.headers['x-request-id']).toBe('abc-123');
     expect(unsafe.headers['x-request-id']).not.toBe('a'.repeat(500));
+  });
+
+  it('answers 503 REQUEST_TIMEOUT when a handler does not respond in time', async () => {
+    const original = config.server.requestTimeout;
+    config.server.requestTimeout = 50;
+    try {
+      const hanging = createTestApp({
+        launchpadService: { getLiveLaunches: () => new Promise(() => {}) } as unknown as LaunchpadService,
+      });
+      const res = await request(hanging).get('/api/launches/live');
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('REQUEST_TIMEOUT');
+      expect(res.headers['cache-control']).toBe('no-store');
+    } finally {
+      config.server.requestTimeout = original;
+    }
   });
 });
