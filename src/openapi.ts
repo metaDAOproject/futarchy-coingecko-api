@@ -147,9 +147,9 @@ export const openApiSpec = {
       '',
       '**Units.** Token amounts, prices and volumes are in human units (already divided by the mint decimals). Most adapters serve them as decimal strings; fields suffixed `Raw` are integer strings in base units. Adapters whose consumer requires JSON numbers (CoinMarketCap, DexScreener, the Jupiter supply endpoints) serve numbers, as noted per schema.',
       '',
-      '**Rate limits.** Anonymous clients get 60 requests per minute per IP. Trusted partners send an `X-API-Key` header and get a higher limit; an unknown key is rejected with 401 `INVALID_API_KEY`. Rate-limited responses carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds); a 429 also carries `Retry-After` (seconds). Container probes (`/health/startup`, `/health/ready`, `/health/live`) are not rate limited.',
+      '**Rate limits.** Anonymous clients get 60 requests per minute per IP. Trusted partners send an `X-API-Key` header and get a higher limit; an unknown key is rejected with 401 `INVALID_API_KEY`. Rate-limited responses carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds); a 429 also carries `Retry-After` (seconds). Container probes (`/health/startup`, `/health/ready`, `/health/live`) are not rate limited. Limits are enforced across all replicas when the deployment shares a Redis store.',
       '',
-      '**Caching.** Successful data responses are sent with `Cache-Control: private, max-age=30` (client-side reuse only; responses carry per-caller rate-limit headers). Errors, health and metrics responses are `Cache-Control: no-store`.',
+      '**Caching.** Successful data responses are sent with `Cache-Control: private, max-age=30` (client-side reuse only; responses carry per-caller rate-limit headers). Errors, health and metrics responses are `Cache-Control: no-store`. Responses over 1 KB are compressed (`br`, `gzip` or `deflate`) when the request sends `Accept-Encoding`.',
       '',
       '**Serving invariant.** Infrastructure failures (Solana RPC, served database) return a 5xx. The API never answers 200 with zero, empty, or placeholder financial data because a dependency failed. Retry on 5xx; treat a 200 as authoritative.',
       '',
@@ -224,7 +224,7 @@ export const openApiSpec = {
       get: {
         operationId: 'getCoinGeckoTickers',
         summary: 'CoinGecko tickers',
-        description: 'One ticker per FutarchyAMM spot market. Price, spread and liquidity come from live pool reserves; 24h volume, high and low come from the served ETL. A market with no trades in the last 24h reports volume "0" and omits high/low. Returns 503 `SERVED_DB_UNAVAILABLE` when the served database is not connected.',
+        description: 'One ticker per FutarchyAMM spot market. Price, spread and liquidity come from live pool reserves; 24h volume, high and low come from the served ETL. A market with no trades in the last 24h reports volume "0" and omits high/low. Returns 503 `SERVED_DB_UNAVAILABLE` when the served database is not connected, and 503 `SERVED_DATA_STALE` when the newest FutarchyAMM spot swap is older than the server\'s freshness limit (default 6h), rather than reporting volume that drains to zero behind a stalled pipeline.',
         tags: ['CoinGecko'],
         security: OPTIONAL_API_KEY,
         responses: {
@@ -252,7 +252,7 @@ export const openApiSpec = {
           },
           {
             name: 'endDate', in: 'query', required: true,
-            description: 'Last UTC day, inclusive (YYYY-MM-DD).',
+            description: 'Last UTC day, inclusive (YYYY-MM-DD). The range may span at most 366 days (server default); split longer histories into several requests.',
             schema: { type: 'string', format: 'date', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
             example: '2026-01-31',
           },
@@ -365,7 +365,7 @@ export const openApiSpec = {
       get: {
         operationId: 'getCmcSummary',
         summary: 'CoinMarketCap summary',
-        description: '24h overview of every tradeable pair. 503 codes: `SERVED_DB_UNAVAILABLE`, `CMC_ALLOWLIST_NO_MATCH`, `CMC_DUPLICATE_BASE_MINT`. 500 `CMC_MALFORMED_METRIC` when the served ETL returns a non-numeric metric.',
+        description: '24h overview of every tradeable pair. 503 codes: `SERVED_DB_UNAVAILABLE`, `SERVED_DATA_STALE`, `CMC_ALLOWLIST_NO_MATCH`, `CMC_DUPLICATE_BASE_MINT`. 500 `CMC_MALFORMED_METRIC` when the served ETL returns a non-numeric metric.',
         tags: ['CoinMarketCap'],
         security: OPTIONAL_API_KEY,
         responses: {
@@ -727,7 +727,7 @@ export const openApiSpec = {
         content: { 'application/json': { schema: ref('Error') } },
       },
       ServiceUnavailable: {
-        description: 'A dependency is unavailable (e.g. `SERVED_DB_UNAVAILABLE`) or the request timed out (`REQUEST_TIMEOUT`). Retry later.',
+        description: 'A dependency is unavailable or its data is stale (e.g. `SERVED_DB_UNAVAILABLE`, `SERVED_DATA_STALE`) or the request timed out (`REQUEST_TIMEOUT`). Retry later.',
         headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
         content: { 'application/json': { schema: ref('Error') } },
       },
@@ -757,7 +757,7 @@ export const openApiSpec = {
           code: {
             type: 'string',
             description: 'Stable machine-readable code.',
-            examples: ['NOT_FOUND', 'RATE_LIMITED', 'INVALID_API_KEY', 'INVALID_QUERY_PARAMETER', 'INVALID_MINT_ADDRESS', 'SERVED_DB_UNAVAILABLE', 'REQUEST_TIMEOUT', 'INTERNAL_ERROR'],
+            examples: ['NOT_FOUND', 'RATE_LIMITED', 'INVALID_API_KEY', 'INVALID_QUERY_PARAMETER', 'INVALID_MINT_ADDRESS', 'SERVED_DB_UNAVAILABLE', 'SERVED_DATA_STALE', 'REQUEST_TIMEOUT', 'INTERNAL_ERROR'],
           },
           field: { type: 'string', description: 'On a 400: the request parameter that was rejected.', examples: ['startDate', 'id'] },
           requestId: { type: 'string', description: 'Request id, same as the `X-Request-Id` header.' },
