@@ -147,4 +147,20 @@ describe('Financial endpoint failure paths (infra failure → 5xx, never fake da
       expect(res.body).not.toHaveProperty('events');
     });
   });
+
+  describe('/api/launches/live', () => {
+    it('returns 500 when the launch scan fails, not an empty launch list', async () => {
+      const launchpadService = {
+        getLiveLaunches: async () => {
+          throw new Error('RPC connection refused');
+        },
+      } as unknown as LaunchpadService;
+      const app = createTestApp({ launchpadService });
+
+      const res = await request(app).get('/api/launches/live');
+
+      expect(res.status).toBe(500);
+      expect(res.body).not.toHaveProperty('launches');
+    });
+  });
 });
