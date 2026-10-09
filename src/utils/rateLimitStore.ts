@@ -70,13 +70,15 @@ export type RedisLike = Pick<RedisClient, 'connected' | 'connect' | 'send'>;
  * Rate limiting must never take the API down: while Redis is unreachable,
  * slow (over `timeoutMs`) or erroring, each request is counted in the
  * per-process fallback instead, and a reconnect is attempted at most every
- * `reconnectIntervalMs`. (Bun's client, with the offline queue disabled so
+ * `reconnectIntervalMs`; after a failed or slow command Redis is skipped for
+ * that long too. (Bun's client, with the offline queue disabled so
  * commands fail fast, does not reconnect by itself once it has given up.)
  */
 export class RedisRateLimitStore implements RateLimitStore {
   private connecting = false;
   private lastConnectAttempt = 0;
   private lastDegradedLog = 0;
+  private bypassUntil = 0;
 
   constructor(
     private readonly client: RedisLike,
@@ -87,6 +89,12 @@ export class RedisRateLimitStore implements RateLimitStore {
   }
 
   async hit(key: string, windowMs: number): Promise<RateLimitHit> {
+    // Circuit breaker: after a failure, skip Redis for reconnectIntervalMs so a
+    // half-open connection (connected, never answering) costs one timeout,
+    // not timeoutMs added to every request.
+    if (Date.now() < this.bypassUntil) {
+      return this.fallback.hit(key, windowMs);
+    }
     if (!this.client.connected) {
       this.ensureConnected();
       this.logDegraded('not connected');
@@ -98,6 +106,7 @@ export class RedisRateLimitStore implements RateLimitStore {
       ) as [number, number];
       return { count: Number(count), resetTime: Date.now() + Number(ttl) };
     } catch (error) {
+      this.bypassUntil = Date.now() + this.options.reconnectIntervalMs;
       this.logDegraded(error instanceof Error ? error.message : String(error));
       this.ensureConnected();
       return this.fallback.hit(key, windowMs);

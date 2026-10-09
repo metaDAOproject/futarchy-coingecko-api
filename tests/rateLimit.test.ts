@@ -119,17 +119,21 @@ describe('Rate limiting', () => {
 
     it('keeps limiting per process when Redis is down or hangs, instead of failing requests', async () => {
       config.server.rateLimit.maxRequests = 2;
-      for (const send of [
+      for (const failure of [
         async () => { throw new Error('Connection has failed'); },
         () => new Promise(() => {}), // accepted, never answered
       ]) {
+        let sends = 0;
+        const send = () => { sends++; return failure(); };
         const client = { connected: true, connect: async () => {}, send } as unknown as RedisLike;
-        const store = new RedisRateLimitStore(client, new MemoryRateLimitStore(), { timeoutMs: 20, reconnectIntervalMs: 0 });
+        const store = new RedisRateLimitStore(client, new MemoryRateLimitStore(), { timeoutMs: 20, reconnectIntervalMs: 60_000 });
         const app = createApp({ services: createTestServices(), rateLimitStore: store });
 
         expect((await request(app).get('/health')).status).toBe(200);
         expect((await request(app).get('/health')).status).toBe(200);
         expect((await request(app).get('/health')).status).toBe(429);
+        // Circuit breaker: only the first request waited on Redis.
+        expect(sends).toBe(1);
       }
     });
 

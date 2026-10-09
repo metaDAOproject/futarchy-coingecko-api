@@ -455,11 +455,43 @@ export class ExternalDatabaseService {
    * Throws on connection or query failure.
    */
   async getServedDataFreshness(): Promise<ServedDataFreshness> {
-    // Read by every 24h-volume request (stale-data guard) as well as the
-    // heartbeat and /api/health; MAX(block_time) over every swap is not free.
-    // ageSeconds can be up to CACHE_SERVED_METRICS_TTL behind, far below the
-    // hours-scale thresholds it is compared against.
+    // Read by the heartbeat and by every /api/health request; MAX(block_time)
+    // over every swap is not free. ageSeconds can be up to
+    // CACHE_SERVED_METRICS_TTL behind, far below the hours-scale thresholds it
+    // is compared against.
     return this.cachedAggregate('freshness', () => this.fetchServedDataFreshness());
+  }
+
+  /**
+   * Freshness of the FutarchyAMM spot swaps alone: the source behind the
+   * rolling-24h volume of /api/tickers and /cmc/*. getServedDataFreshness
+   * also counts Meteora rows, which come from a separate ETL and would keep
+   * reporting "fresh" while the FutarchyAMM pipeline is stalled. Same
+   * newest-slot query as /dexscreener/latest-block. Cached like the other
+   * aggregates; throws on connection or query failure.
+   */
+  async getFutarchySpotFreshness(): Promise<ServedDataFreshness> {
+    return this.cachedAggregate('futarchySpotFreshness', async () => {
+      if (!this.pool || !this.isConnected) {
+        throw new Error('External database not connected');
+      }
+      const result = await this.pool.query(
+        `SELECT block_time AS latest_swap_at,
+                extract(epoch FROM now() - block_time)::bigint AS age_seconds
+         FROM futarchy.user_pool_swaps
+         WHERE source = 'futarchy_amm' AND market_kind = 'spot'
+         ORDER BY slot DESC
+         LIMIT 1`
+      );
+      const row = result.rows[0];
+      if (!row || row.latest_swap_at == null) {
+        return { latestSwapAt: null, ageSeconds: null };
+      }
+      return {
+        latestSwapAt: new Date(row.latest_swap_at).toISOString(),
+        ageSeconds: Number(row.age_seconds),
+      };
+    });
   }
 
   private async fetchServedDataFreshness(): Promise<ServedDataFreshness> {

@@ -21,6 +21,7 @@ export function createMockExternalDatabaseService(): ExternalDatabaseService {
     getFutarchyAmmDailyActivity: async () => [],
     getFirstTradeDates: async () => new Map(),
     getServedDataFreshness: freshServedData,
+    getFutarchySpotFreshness: freshServedData,
     checkServedDataContract: async () => ({
       ok: true,
       checkedAt: new Date().toISOString(),

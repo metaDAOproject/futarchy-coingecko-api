@@ -148,7 +148,7 @@ export const config = {
     // already timed out (SERVER_REQUEST_TIMEOUT, 30s). 0 disables it.
     statementTimeoutMs: intEnv('DATABASE_PG_STATEMENT_TIMEOUT_MS', 25000),
     // /api/tickers and /cmc/summary|ticker answer 503 SERVED_DATA_STALE when
-    // the newest indexed swap is older than this (seconds), instead of serving
+    // the newest FutarchyAMM spot swap is older than this (seconds), instead of serving
     // 24h volume that drains to zero behind a stalled ETL. Same default as the
     // heartbeat's stale-data alert. 0 disables the guard.
     maxDataAgeSeconds: intEnv('SERVED_DATA_MAX_AGE_SECONDS', 21600),

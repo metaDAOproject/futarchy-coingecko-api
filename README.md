@@ -85,7 +85,7 @@ Returns all DAO tickers with pricing, volume, and liquidity information. Automat
 served DB is unavailable, the endpoint returns `503 SERVED_DB_UNAVAILABLE` instead of
 reporting zero volume.
 
-**Stale data**: if the newest indexed swap is older than `SERVED_DATA_MAX_AGE_SECONDS`
+**Stale data**: if the newest FutarchyAMM spot swap is older than `SERVED_DATA_MAX_AGE_SECONDS`
 (default 6h), `/api/tickers`, `/cmc/summary` and `/cmc/ticker` return
 `503 SERVED_DATA_STALE`. A stalled ETL would otherwise serve rolling-24h volume that
 drains toward zero while looking healthy; with a 503, pollers keep their last good
@@ -481,7 +481,7 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | `CACHE_SERVED_METRICS_TTL` | Reuse window (ms) for the served-DB aggregates behind `/api/tickers` and `/cmc/*` (24h volume, 24h-ago reserves, first-trade dates). Concurrent requests share one query; failures are never cached. `0` only coalesces concurrent queries | `30000` |
 | `RATE_LIMIT_REDIS_URL` | `redis://` / `rediss://` URL for rate-limit counters shared by every replica. Unset: each replica counts on its own (N replicas allow N× the limits). If Redis becomes unreachable or slow (>250ms), requests fall back to per-process counting and it reconnects automatically | — |
-| `SERVED_DATA_MAX_AGE_SECONDS` | `/api/tickers` and `/cmc/summary`/`/cmc/ticker` return `503 SERVED_DATA_STALE` when the newest indexed swap is older than this. `0` disables | `21600` |
+| `SERVED_DATA_MAX_AGE_SECONDS` | `/api/tickers` and `/cmc/summary`/`/cmc/ticker` return `503 SERVED_DATA_STALE` when the newest FutarchyAMM spot swap is older than this. `0` disables | `21600` |
 | `MARKET_DATA_MAX_RANGE_DAYS` | Max inclusive days per `/api/market-data` request. `0` disables | `366` |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARN` or `ERROR`. `INFO` writes one structured access-log line per request (probes and `/metrics` excluded) | `INFO` |
 | **Served indexer DB (required — the only database this API uses)** | | |

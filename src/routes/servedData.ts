@@ -13,7 +13,8 @@ const ALERT_COOLDOWN_MS = 10 * 60 * 1000;
  *
  * - SERVED_DB_UNAVAILABLE: not connected — reporting zero volume would be a
  *   false financial claim.
- * - SERVED_DATA_STALE: connected, but the newest indexed swap is older than
+ * - SERVED_DATA_STALE: connected, but the newest FutarchyAMM spot swap (the
+ *   source of these feeds' volume, not Meteora) is older than
  *   SERVED_DATA_MAX_AGE_SECONDS. A stalled ETL otherwise reads as a market
  *   whose 24h volume drains to zero; a 503 makes pollers keep their last good
  *   data instead. A failed freshness query propagates as a 5xx.
@@ -34,7 +35,7 @@ export async function requireFreshServedDb(
 
   const maxAgeSeconds = config.externalDatabase.maxDataAgeSeconds;
   if (maxAgeSeconds > 0) {
-    const { ageSeconds, latestSwapAt } = await externalDatabaseService.getServedDataFreshness();
+    const { ageSeconds, latestSwapAt } = await externalDatabaseService.getFutarchySpotFreshness();
     if (ageSeconds === null || ageSeconds > maxAgeSeconds) {
       logger.warn('Served data is stale; refusing to serve 24h volume', { requestId: req.requestId, feed, ageSeconds, latestSwapAt });
       sendAlert(

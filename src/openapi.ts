@@ -224,7 +224,7 @@ export const openApiSpec = {
       get: {
         operationId: 'getCoinGeckoTickers',
         summary: 'CoinGecko tickers',
-        description: 'One ticker per FutarchyAMM spot market. Price, spread and liquidity come from live pool reserves; 24h volume, high and low come from the served ETL. A market with no trades in the last 24h reports volume "0" and omits high/low. Returns 503 `SERVED_DB_UNAVAILABLE` when the served database is not connected, and 503 `SERVED_DATA_STALE` when the newest indexed swap is older than the server\'s freshness limit (default 6h), rather than reporting volume that drains to zero behind a stalled pipeline.',
+        description: 'One ticker per FutarchyAMM spot market. Price, spread and liquidity come from live pool reserves; 24h volume, high and low come from the served ETL. A market with no trades in the last 24h reports volume "0" and omits high/low. Returns 503 `SERVED_DB_UNAVAILABLE` when the served database is not connected, and 503 `SERVED_DATA_STALE` when the newest FutarchyAMM spot swap is older than the server\'s freshness limit (default 6h), rather than reporting volume that drains to zero behind a stalled pipeline.',
         tags: ['CoinGecko'],
         security: OPTIONAL_API_KEY,
         responses: {

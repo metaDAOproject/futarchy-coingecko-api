@@ -101,10 +101,12 @@ describe('Financial endpoint failure paths (infra failure → 5xx, never fake da
 
   describe('stale served data (stalled ETL)', () => {
     for (const path of ['/api/tickers', '/cmc/summary', '/cmc/ticker']) {
+      // The default mock reports the whole swaps table (incl. Meteora) as fresh:
+      // only the FutarchyAMM spot source behind these feeds is stalled.
       it(`${path} returns 503 SERVED_DATA_STALE instead of draining 24h volume`, async () => {
         for (const ageSeconds of [7 * 3600, null]) {
           const externalDatabaseService = failingExtDb({
-            getServedDataFreshness: async () => ({ latestSwapAt: ageSeconds ? '2026-10-08T00:00:00.000Z' : null, ageSeconds }),
+            getFutarchySpotFreshness: async () => ({ latestSwapAt: ageSeconds ? '2026-10-08T00:00:00.000Z' : null, ageSeconds }),
           });
           const res = await request(createTestApp({ externalDatabaseService })).get(path);
 
@@ -116,7 +118,7 @@ describe('Financial endpoint failure paths (infra failure → 5xx, never fake da
 
     it('returns 5xx when the freshness check itself fails', async () => {
       const externalDatabaseService = failingExtDb({
-        getServedDataFreshness: async () => { throw new Error('query failed'); },
+        getFutarchySpotFreshness: async () => { throw new Error('query failed'); },
       });
       const res = await request(createTestApp({ externalDatabaseService })).get('/api/tickers');
 
