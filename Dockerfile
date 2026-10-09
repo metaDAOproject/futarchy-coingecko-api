@@ -1,6 +1,6 @@
 # Pin the base image to the same Bun version as packageManager in package.json.
 # (`latest` would silently change the runtime under us between builds.)
-ARG BUN_IMAGE=oven/bun:1.3.14
+ARG BUN_IMAGE=oven/bun:1.4.2
 
 # ---------------------------------------------------------------------------
 # vault: fetch the HashiCorp vault CLI. gpg/wget/lsb-release are only needed
