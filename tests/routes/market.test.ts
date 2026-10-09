@@ -43,6 +43,8 @@ describe('Market Routes', () => {
       ['startDate is malformed', { startDate: '01-01-2024', endDate: '2024-01-15' }, 'startDate'],
       // new Date() rolls 2024-02-31 over to March 2; Postgres would reject it (500).
       ['startDate is not a calendar date', { startDate: '2024-02-31', endDate: '2024-03-15' }, 'startDate'],
+      ['startDate is year 0000 (absent in Postgres)', { startDate: '0000-01-01', endDate: '0000-01-02' }, 'startDate'],
+      ['tokens lists no mints', { startDate: '2024-01-01', endDate: '2024-01-15', tokens: ',,' }, 'tokens'],
       ['startDate is after endDate', { startDate: '2024-02-01', endDate: '2024-01-01' }, 'startDate'],
       ['a token is not a mint address', { startDate: '2024-01-01', endDate: '2024-01-15', tokens: 'ZKFG' }, 'tokens'],
     ])('returns 400 when %s', async (_case, query, field) => {

@@ -23,7 +23,13 @@ export function createMarketRouter(services: ServiceGetters): Router {
       throw AppError.badRequest('startDate must be on or before endDate', 'INVALID_QUERY_PARAMETER', 'startDate');
     }
 
-    const tokens = orBadRequest(parseCommaSeparatedList(req.query.tokens as string, 'tokens', { maxLength: MAX_TOKENS }));
+    const rawTokens = req.query.tokens as string | undefined;
+    const tokens = orBadRequest(parseCommaSeparatedList(rawTokens, 'tokens', { maxLength: MAX_TOKENS }));
+    // A blank `tokens=` still means "all tokens"; a non-blank list with no
+    // entries (`tokens=,,`) must not silently widen to every token.
+    if (rawTokens?.trim() && !tokens) {
+      throw AppError.badRequest('tokens must contain at least one mint address', 'INVALID_QUERY_PARAMETER', 'tokens');
+    }
     // Tokens are base mints; anything else can only ever match nothing, so
     // reject it instead of answering a typo with a silent empty 200.
     for (const token of tokens ?? []) orBadRequest(parseSolanaAddress(token, 'tokens'));

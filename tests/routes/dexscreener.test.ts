@@ -247,6 +247,13 @@ describe('DexScreener Routes', () => {
       expect(res.status).toBe(503);
     });
 
+    it.each([' ', '0x10', '1e3', '-1', '1.5'])('rejects fromBlock=%p as not a slot, before querying', async (fromBlock) => {
+      const app = createTestApp({ externalDatabaseService: extDbReturning([]) });
+      const res = await request(app).get('/dexscreener/events').query({ fromBlock, toBlock: 100 });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'INVALID_QUERY_PARAMETER', field: 'fromBlock' });
+    });
+
     it('rejects an out-of-order block range', async () => {
       const app = createTestApp({ externalDatabaseService: extDbReturning([]) });
       const res = await request(app).get('/dexscreener/events').query({ fromBlock: 100, toBlock: 10 });
