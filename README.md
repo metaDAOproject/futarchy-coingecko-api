@@ -6,6 +6,28 @@ A multi-aggregator DEX API for the Futarchy protocol that automatically discover
 
 **Base URL:** `https://your-api-domain.com`
 
+### Versioning
+
+Every data endpoint is served under a version prefix: `/v1/api/tickers`,
+`/v1/cmc/summary`, `/v1/dexscreener/events`, `/v1/api/launches/live`, and so on.
+New integrations should use the versioned URLs.
+
+- **Unversioned paths** (`/api/tickers`, `/cmc/summary`, …) are a frozen alias
+  of v1, kept so existing partner integrations keep working. The paths below
+  are written unversioned; prefix them with `/v1`.
+- **Not versioned:** health, probe and metrics endpoints (`/health*`,
+  `/api/health`, `/metrics`, `/`). They are operational, not part of the API
+  contract.
+- **Breaking changes** ship as a new version (`/v2/...`). Earlier versions are
+  left unchanged.
+- **Deprecation:** a deprecated version (or the unversioned alias) answers
+  every request with `Deprecation` ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)),
+  `Sunset` ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)) and
+  `Link: <…>; rel="successor-version"` headers. It is removed after its sunset date.
+
+Versions and their deprecation status are configured in one place,
+`API_VERSIONS` and `UNVERSIONED_ALIAS` in `src/routes/index.ts`.
+
 ---
 
 ### CoinGecko Endpoints
@@ -425,9 +447,11 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `TRUST_PROXY_HOPS` | Reverse-proxy hops in front of the API (needed for per-IP rate limiting behind a LB) | `0` |
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
+| `CACHE_TICKERS_TTL` | On-chain DAO/pool snapshot TTL (ms); older snapshots refresh in the background | `55000` |
+| `CACHE_TICKERS_MAX_STALE` | Max age (ms) of a snapshot served while refreshing; past it requests wait and fail (5xx) if the RPC is down | `300000` |
+| `RPC_TIMEOUT_MS` | Per-request Solana RPC timeout (ms) | `20000` |
 | `CACHE_CONTROL_MAX_AGE` | `Cache-Control` max-age (seconds) on successful data responses | `30` |
 | `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing. Keep it + 15s under the container's termination grace period | `10000` |
-| `CACHE_TICKERS_TTL` | On-chain data cache TTL (ms) | `55000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | **Served indexer DB (required — the only database this API uses)** | | |
 | `DATABASE_PG_URL` | Read-only connection to the served indexer DB (Meteora, tickers, DexScreener, first-trade-dates). **Required** — `/api/market-data`, `/api/tickers`, `/cmc/summary`, `/cmc/ticker`, and the DexScreener routes return 503 without it. | — |
@@ -456,7 +480,7 @@ src/
 │   └── heartbeat.ts              # Background self-check (served DB, freshness, contract)
 ├── config.ts                     # Environment variables & configuration
 ├── routes/
-│   ├── index.ts                  # Route registration
+│   ├── index.ts                  # Route registration + API versions (/v1, unversioned alias)
 │   ├── coingecko.ts              # GET /api/tickers
 │   ├── coinmarketcap.ts          # CoinMarketCap DEX adapter (summary/ticker/assets)
 │   ├── dexscreener.ts            # DexScreener adapter (4 endpoints)
