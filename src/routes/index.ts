@@ -23,7 +23,7 @@ export interface ApiDeprecation {
   successor: string;
 }
 
-interface ApiVersion {
+export interface ApiVersion {
   prefix: string;
   createRoutes: (services: ServiceGetters) => Router;
   deprecation?: ApiDeprecation;
@@ -61,7 +61,13 @@ const API_VERSIONS: ApiVersion[] = [
  * are configured with. Frozen as an alias of v1; deprecate it here once
  * partners have moved to versioned URLs.
  */
-const UNVERSIONED_ALIAS: { version: string; deprecation?: ApiDeprecation } = { version: '/v1' };
+export interface UnversionedAlias {
+  /** Prefix of the API version the unversioned paths serve. */
+  version: string;
+  deprecation?: ApiDeprecation;
+}
+
+const UNVERSIONED_ALIAS: UnversionedAlias = { version: '/v1' };
 
 const toHttpDate = (date: Date): string => date.toUTCString();
 
@@ -75,31 +81,59 @@ export function deprecationHeaders(prefix: string, deprecation: ApiDeprecation) 
     if (deprecation.sunset) res.setHeader('Sunset', toHttpDate(deprecation.sunset));
     const successorUrl = deprecation.successor + req.originalUrl.slice(prefix.length);
     res.setHeader('Link', `<${successorUrl}>; rel="successor-version"`);
+    // Let cross-origin browser clients read the migration headers too.
+    const exposed = res.getHeader('Access-Control-Expose-Headers');
+    res.setHeader(
+      'Access-Control-Expose-Headers',
+      [exposed, 'Deprecation, Sunset, Link'].filter(Boolean).join(', ')
+    );
     next();
   };
 }
 
-/** All versioned API routes plus the unversioned legacy alias. */
-export function createApiRoutes(services: ServiceGetters): Router {
+/**
+ * All versioned API routes plus the unversioned legacy alias. `versions` and
+ * `alias` default to the served configuration above (overridable in tests).
+ */
+export function createApiRoutes(
+  services: ServiceGetters,
+  versions: ApiVersion[] = API_VERSIONS,
+  alias: UnversionedAlias = UNVERSIONED_ALIAS,
+): Router {
   const router = Router();
+  const versionPrefixes = versions.map((v) => v.prefix);
   const mount = (prefix: string, routes: Router, deprecation?: ApiDeprecation) => {
-    const path = prefix || '/';
-    if (deprecation) router.use(path, deprecationHeaders(prefix, deprecation), routes);
-    else router.use(path, routes);
+    if (!deprecation) {
+      router.use(prefix || '/', routes);
+      return;
+    }
+    const headers = deprecationHeaders(prefix, deprecation);
+    if (prefix) {
+      router.use(prefix, headers, routes);
+      return;
+    }
+    // The unversioned alias is mounted at '/', so unmatched requests under a
+    // version prefix (e.g. a /v1 404) fall through to it; don't stamp them
+    // with the alias's deprecation.
+    router.use('/', (req: Request, res: Response, next: NextFunction) => {
+      const underVersion = versionPrefixes.some((p) => req.path === p || req.path.startsWith(`${p}/`));
+      if (underVersion) next();
+      else headers(req, res, next);
+    }, routes);
   };
 
   // Each version's router is built once; the unversioned alias mounts the same
   // instance, so the two paths share in-router state (e.g. DexScreener caches).
   const routersByPrefix = new Map<string, Router>();
-  for (const version of API_VERSIONS) {
+  for (const version of versions) {
     const routes = version.createRoutes(services);
     routersByPrefix.set(version.prefix, routes);
     mount(version.prefix, routes, version.deprecation);
   }
 
-  const aliased = routersByPrefix.get(UNVERSIONED_ALIAS.version);
-  if (!aliased) throw new Error(`Unversioned alias targets unknown API version ${UNVERSIONED_ALIAS.version}`);
-  mount('', aliased, UNVERSIONED_ALIAS.deprecation);
+  const aliased = routersByPrefix.get(alias.version);
+  if (!aliased) throw new Error(`Unversioned alias targets unknown API version ${alias.version}`);
+  mount('', aliased, alias.deprecation);
 
   return router;
 }

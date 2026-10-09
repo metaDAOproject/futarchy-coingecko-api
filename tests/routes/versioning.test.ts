@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'bun:test';
-import express from 'express';
+import express, { Router } from 'express';
 import request from 'supertest';
-import { createTestApp } from '../helpers/testApp.js';
-import { deprecationHeaders } from '../../src/routes/index.js';
+import { createTestApp, createTestServices } from '../helpers/testApp.js';
+import { createServiceGetters } from '../../src/routes/types.js';
+import { createApiRoutes } from '../../src/routes/index.js';
 import type { LaunchpadService } from '../../src/services/launchpadService.js';
 
 const launchpadService = {
@@ -41,23 +42,57 @@ describe('API versioning', () => {
     }
   });
 
-  it('advertises deprecation, sunset and the successor URL for a deprecated version', async () => {
+  describe('deprecation through the real mounts', () => {
     const deprecation = {
       since: new Date('2026-11-01T00:00:00Z'),
       sunset: new Date('2027-05-01T00:00:00Z'),
       successor: '/v2',
     };
-    const versioned = express();
-    versioned.use('/v1', deprecationHeaders('/v1', deprecation), (_req, res) => { res.json({}); });
-    const unversioned = express();
-    unversioned.use(deprecationHeaders('', deprecation), (_req, res) => { res.json({}); });
+    const v1Routes = () => {
+      const r = Router();
+      r.get('/api/tickers', (_req, res) => { res.json({ ok: true }); });
+      return r;
+    };
+    const build = (versionDeprecated: boolean, aliasDeprecated: boolean) => {
+      const services = createServiceGetters(createTestServices());
+      const built = express();
+      built.get('/health', (_req, res) => { res.json({ status: 'ok' }); });
+      built.use(createApiRoutes(
+        services,
+        [{ prefix: '/v1', createRoutes: v1Routes, ...(versionDeprecated ? { deprecation } : {}) }],
+        { version: '/v1', ...(aliasDeprecated ? { deprecation } : {}) },
+      ));
+      return built;
+    };
 
-    const v1 = await request(versioned).get('/v1/api/tickers?x=1');
-    expect(v1.headers.deprecation).toBe('@1793491200');
-    expect(v1.headers.sunset).toBe('Sat, 01 May 2027 00:00:00 GMT');
-    expect(v1.headers.link).toBe('</v2/api/tickers?x=1>; rel="successor-version"');
+    it('stamps only the unversioned alias when only the alias is deprecated', async () => {
+      const built = build(false, true);
 
-    const legacy = await request(unversioned).get('/cmc/summary');
-    expect(legacy.headers.link).toBe('</v2/cmc/summary>; rel="successor-version"');
+      const legacy = await request(built).get('/api/tickers?x=1');
+      expect(legacy.headers.deprecation).toBe('@1793491200');
+      expect(legacy.headers.sunset).toBe('Sat, 01 May 2027 00:00:00 GMT');
+      expect(legacy.headers.link).toBe('</v2/api/tickers?x=1>; rel="successor-version"');
+      expect(legacy.headers['access-control-expose-headers']).toContain('Deprecation, Sunset, Link');
+
+      for (const path of ['/v1/api/tickers', '/v1/no-such-route', '/health']) {
+        const res = await request(built).get(path);
+        expect(res.headers.deprecation).toBeUndefined();
+        expect(res.headers.link).toBeUndefined();
+      }
+    });
+
+    it('stamps only the version when only the version is deprecated', async () => {
+      const built = build(true, false);
+
+      const v1 = await request(built).get('/v1/api/tickers');
+      expect(v1.headers.deprecation).toBe('@1793491200');
+      expect(v1.headers.link).toBe('</v2/api/tickers>; rel="successor-version"');
+
+      for (const path of ['/api/tickers', '/health']) {
+        const res = await request(built).get(path);
+        expect(res.headers.deprecation).toBeUndefined();
+        expect(res.headers.link).toBeUndefined();
+      }
+    });
   });
 });
