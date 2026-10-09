@@ -299,6 +299,49 @@ Returns circulating supply — total minus team performance package.
 
 ---
 
+### Launch Endpoints
+
+#### GET `/api/launches/live`
+
+Launches still accepting commitments across launchpad v0.6, v0.7 and v0.8 —
+on-chain state `live` with a close time in the future — read directly from Solana and cached for `CACHE_LIVE_LAUNCHES_TTL`
+(default 5 minutes). RPC failures return 5xx, never an empty list.
+
+```json
+{
+  "count": 1,
+  "updatedAt": "2026-10-09T17:00:00.000Z",
+  "launches": [
+    {
+      "launchAddress": "…",
+      "version": "v0.7",
+      "tokenAddress": "…",
+      "quoteMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "quoteDecimals": 6,
+      "committerCount": 412,
+      "totalCommitted": "251.5",
+      "totalCommittedRaw": "251500000",
+      "minimumRaise": "500000",
+      "minimumRaiseRaw": "500000000000",
+      "closeTime": 1760345600,
+      "tokenName": "The Syndicate",
+      "tokenSymbol": "GANG"
+    }
+  ]
+}
+```
+
+- `tokenAddress` — mint of the token being launched; `tokenName` / `tokenSymbol`
+  come from its Metaplex metadata (`null` if it has none).
+- `committerCount` / `totalCommitted` — count and sum of the launch's funding
+  records with a non-zero `committedAmount` (one record per funder).
+- `minimumRaise` — the launch's on-chain `minimumRaiseAmount`.
+- `closeTime` — unix seconds, `unixTimestampStarted + secondsForLaunch`. Launches
+  past this time stay `live` on-chain until someone calls `closeLaunch` (many
+  never are); they are excluded at request time, even within a cache window.
+
+---
+
 ### Health & Admin
 
 | Endpoint | Description |
@@ -354,6 +397,7 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
 | `CACHE_TICKERS_TTL` | On-chain data cache TTL (ms) | `55000` |
+| `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | **Served indexer DB (required — the only database this API uses)** | | |
 | `DATABASE_PG_URL` | Read-only connection to the served indexer DB (Meteora, tickers, DexScreener, first-trade-dates). **Required** — `/api/market-data`, `/api/tickers`, `/cmc/summary`, `/cmc/ticker`, and the DexScreener routes return 503 without it. | — |
 | `DATABASE_PG_SSL` | Enable SSL (server cert verified against system CAs) | `false` |
@@ -387,6 +431,7 @@ src/
 │   ├── dexscreener.ts            # DexScreener adapter (4 endpoints)
 │   ├── market.ts                 # GET /api/market-data (user_pool ETL)
 │   ├── supply.ts                 # GET /api/supply/*
+│   ├── launches.ts               # GET /api/launches/live
 │   ├── health.ts                 # Liveness + readiness checks
 │   ├── metrics.ts                # Prometheus metrics
 │   └── root.ts                   # GET / (API info)
@@ -395,7 +440,7 @@ src/
 │   ├── priceService.ts           # Price, spread, liquidity calculations
 │   ├── externalDatabaseService.ts # Read-only served ETL DB connection (the only DB)
 │   ├── solanaService.ts          # SPL token supply queries
-│   ├── launchpadService.ts       # Token allocation breakdown
+│   ├── launchpadService.ts       # Token allocation breakdown + live launches
 │   └── metricsService.ts         # Prometheus counters/histograms
 ├── types/
 │   ├── coingecko.ts              # CoinGecko response types

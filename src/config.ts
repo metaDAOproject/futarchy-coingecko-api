@@ -36,6 +36,9 @@ export const config = {
     // full DAO RPC scan from ~6x/minute to ~1x/minute.
     // Lower = more real-time prices but more RPC calls.
     tickersTTL: parseInt(process.env.CACHE_TICKERS_TTL || '55000'),
+    // TTL for the /api/launches/live snapshot (default: 5 minutes). Each refresh
+    // scans every launch account plus the funding records of each live launch.
+    liveLaunchesTTL: parseInt(process.env.CACHE_LIVE_LAUNCHES_TTL || '300000'),
   },
   dex: {
     forkType: process.env.DEX_FORK_TYPE || 'Custom',

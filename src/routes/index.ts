@@ -6,6 +6,7 @@ import { createCoinMarketCapRouter } from './coinmarketcap.js';
 
 import { createSupplyRouter } from './supply.js';
 import { createMarketRouter } from './market.js';
+import { createLaunchesRouter } from './launches.js';
 
 import { createDexScreenerRouter } from './dexscreener.js';
 import { createRootRouter } from './root.js';
@@ -22,6 +23,7 @@ export function createRoutes(services: ServiceGetters): Router {
   router.use(createCoinMarketCapRouter(services));
   router.use(createSupplyRouter(services));
   router.use(createMarketRouter(services));
+  router.use(createLaunchesRouter(services));
   router.use(createDexScreenerRouter(services));
   router.use(createRootRouter(services));
 

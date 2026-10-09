@@ -7,6 +7,9 @@ import {
 import {
   LaunchpadClient as LaunchpadClientV07,
 } from "@metadaoproject/programs/launchpad/v0.7";
+import {
+  LaunchpadClient as LaunchpadClientV08,
+} from "@metadaoproject/programs/launchpad/v0.8";
 import { FutarchyClient } from "@metadaoproject/programs/futarchy/v0.6";
 import { getPerformancePackageAddr } from "@metadaoproject/programs/price_based_performance_package/v0.6";
 import {
@@ -15,7 +18,7 @@ import {
   LAUNCHPAD_V0_6_MAINNET_METEORA_CONFIG as MAINNET_METEORA_CONFIG_V06,
   LAUNCHPAD_V0_7_MAINNET_METEORA_CONFIG as MAINNET_METEORA_CONFIG_V07,
 } from "@metadaoproject/programs";
-import { getAccount, getAssociatedTokenAddress } from '@solana/spl-token';
+import { getAccount, getAssociatedTokenAddress, getMint } from '@solana/spl-token';
 import { isTokenAccountAbsent } from '../utils/solanaErrors.js';
 import { config } from '../config.js';
 import BN from 'bn.js';
@@ -85,6 +88,46 @@ export interface LaunchData {
   additionalTokensClaimed?: boolean;
 }
 
+/**
+ * A launch that is currently accepting commitments (on-chain state `live`).
+ * Amounts are in the quote mint (usually USDC); `*Raw` fields are base units.
+ */
+export interface LiveLaunch {
+  launchAddress: string;
+  version: LaunchpadVersion | 'v0.8';
+  /** Mint of the token being launched (the launch's `baseMint`). */
+  tokenAddress: string;
+  quoteMint: string;
+  quoteDecimals: number;
+  /** Number of funding records with a non-zero commitment (one record per funder). */
+  committerCount: number;
+  /** Sum of `committedAmount` across the launch's funding records. */
+  totalCommitted: string;
+  totalCommittedRaw: string;
+  /** On-chain `minimumRaiseAmount`. */
+  minimumRaise: string;
+  minimumRaiseRaw: string;
+  /** Unix seconds: `unixTimestampStarted + secondsForLaunch`. */
+  closeTime: number;
+}
+
+export interface LiveLaunchesSnapshot {
+  updatedAt: string;
+  launches: LiveLaunch[];
+}
+
+// FundingRecord layout: 8-byte discriminator, pdaBump (u8), funder (Pubkey),
+// then launch (Pubkey) — identical in launchpad v0.6, v0.7 and v0.8.
+const FUNDING_RECORD_LAUNCH_OFFSET = 8 + 1 + 32;
+
+function formatUnits(raw: BN, decimals: number): string {
+  if (decimals === 0) return raw.toString();
+  const digits = raw.toString().padStart(decimals + 1, '0');
+  const whole = digits.slice(0, -decimals);
+  const fraction = digits.slice(-decimals).replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
 export type LaunchState =
   | { initialized: Record<string, never> }
   | { active: Record<string, never> }
@@ -96,8 +139,12 @@ export class LaunchpadService {
   private connection: Connection;
   private clientV06: LaunchpadClientV06;
   private clientV07: LaunchpadClientV07;
+  private clientV08: LaunchpadClientV08;
   private futarchyClient: FutarchyClient;
   private cache: Map<string, { data: any; timestamp: number }>;
+  private liveLaunches: { snapshot: LiveLaunchesSnapshot; fetchedAt: number } | null = null;
+  private liveLaunchesInFlight: Promise<LiveLaunchesSnapshot> | null = null;
+  private mintDecimals = new Map<string, Promise<number>>();
 
   constructor() {
     this.connection = new Connection(config.solana.rpcUrl, 'confirmed');
@@ -117,6 +164,7 @@ export class LaunchpadService {
     });
     this.clientV06 = LaunchpadClientV06.createClient({ provider });
     this.clientV07 = LaunchpadClientV07.createClient({ provider });
+    this.clientV08 = LaunchpadClientV08.createClient({ provider });
     this.futarchyClient = FutarchyClient.createClient({ provider });
     this.cache = new Map();
   }
@@ -555,6 +603,120 @@ export class LaunchpadService {
 
   this.setCache(cacheKey, breakdown);
   return breakdown;
+  }
+
+  /**
+   * Launches still accepting commitments across launchpad v0.6/v0.7/v0.8:
+   * on-chain state `live` and close time not yet passed. Launches past their
+   * close time stay `live` on-chain until someone calls closeLaunch (many
+   * never are), so they are excluded at serve time — a launch drops out the
+   * moment it closes, even within a cache window.
+   *
+   * Served from a snapshot refreshed at most once per
+   * `config.cache.liveLaunchesTTL`; concurrent requests during a refresh share
+   * one scan. A failed refresh is not cached and propagates (→ 5xx) rather
+   * than serving an empty list.
+   */
+  async getLiveLaunches(): Promise<LiveLaunchesSnapshot> {
+    const snapshot = await this.getLiveLaunchesSnapshot();
+    const nowSeconds = Date.now() / 1000;
+    return {
+      updatedAt: snapshot.updatedAt,
+      launches: snapshot.launches.filter((launch) => launch.closeTime > nowSeconds),
+    };
+  }
+
+  private async getLiveLaunchesSnapshot(): Promise<LiveLaunchesSnapshot> {
+    if (this.liveLaunches && Date.now() - this.liveLaunches.fetchedAt < config.cache.liveLaunchesTTL) {
+      return this.liveLaunches.snapshot;
+    }
+    if (!this.liveLaunchesInFlight) {
+      this.liveLaunchesInFlight = this.fetchLiveLaunches()
+        .then((snapshot) => {
+          this.liveLaunches = { snapshot, fetchedAt: Date.now() };
+          return snapshot;
+        })
+        .finally(() => {
+          this.liveLaunchesInFlight = null;
+        });
+    }
+    return this.liveLaunchesInFlight;
+  }
+
+  private async fetchLiveLaunches(): Promise<LiveLaunchesSnapshot> {
+    const programs = [
+      { version: 'v0.6', program: this.clientV06.launchpad },
+      { version: 'v0.7', program: this.clientV07.launchpad },
+      { version: 'v0.8', program: this.clientV08.launchpad },
+    ] as const;
+
+    const nowSeconds = Date.now() / 1000;
+    const perProgram = await Promise.all(programs.map(async ({ version, program }) => {
+      const launches = await program.account.launch.all();
+
+      // Keep `live` launches whose close time hasn't passed. Expired launches
+      // stay `live` on-chain until closeLaunch is called (many never are) and
+      // would always be filtered at serve time, so don't read their funding
+      // records at all.
+      const open: Array<{ publicKey: PublicKey; account: (typeof launches)[number]['account']; closeTime: number }> = [];
+      for (const { publicKey, account } of launches) {
+        if (!('live' in account.state)) continue;
+        // A launch only enters `live` via startLaunch, which sets this timestamp.
+        if (!account.unixTimestampStarted) {
+          throw new Error(`Live ${version} launch ${publicKey.toBase58()} has no start timestamp`);
+        }
+        const closeTime = account.unixTimestampStarted.toNumber() + account.secondsForLaunch;
+        if (closeTime > nowSeconds) open.push({ publicKey, account, closeTime });
+      }
+
+      return Promise.all(open.map(async ({ publicKey, account, closeTime }): Promise<LiveLaunch> => {
+        const [fundingRecords, quoteDecimals] = await Promise.all([
+          program.account.fundingRecord.all([
+            { memcmp: { offset: FUNDING_RECORD_LAUNCH_OFFSET, bytes: publicKey.toBase58() } },
+          ]),
+          this.getMintDecimals(account.quoteMint),
+        ]);
+
+        let totalCommitted = new BN(0);
+        let committerCount = 0;
+        for (const { account: record } of fundingRecords) {
+          if (record.committedAmount.isZero()) continue;
+          totalCommitted = totalCommitted.add(record.committedAmount);
+          committerCount++;
+        }
+
+        return {
+          launchAddress: publicKey.toBase58(),
+          version,
+          tokenAddress: account.baseMint.toBase58(),
+          quoteMint: account.quoteMint.toBase58(),
+          quoteDecimals,
+          committerCount,
+          totalCommitted: formatUnits(totalCommitted, quoteDecimals),
+          totalCommittedRaw: totalCommitted.toString(),
+          minimumRaise: formatUnits(account.minimumRaiseAmount, quoteDecimals),
+          minimumRaiseRaw: account.minimumRaiseAmount.toString(),
+          closeTime,
+        };
+      }));
+    }));
+
+    const launches = perProgram.flat().sort((a, b) => a.closeTime - b.closeTime);
+    logger.info(`[Launchpad] Refreshed live launches: ${launches.length} live`);
+    return { updatedAt: new Date().toISOString(), launches };
+  }
+
+  // Caches the pending lookup so launches sharing a quote mint (usually USDC)
+  // make one getMint call. A failed lookup is evicted so the next refresh retries.
+  private getMintDecimals(mint: PublicKey): Promise<number> {
+    const key = mint.toBase58();
+    let decimals = this.mintDecimals.get(key);
+    if (!decimals) {
+      decimals = getMint(this.connection, mint).then((info) => info.decimals);
+      decimals.catch(() => this.mintDecimals.delete(key));
+      this.mintDecimals.set(key, decimals);
+    }
+    return decimals;
   }
 }
 

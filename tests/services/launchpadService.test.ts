@@ -8,9 +8,11 @@
  * bug this suite pins down).
  */
 
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, setSystemTime, afterEach } from 'bun:test';
 import { PublicKey } from '@solana/web3.js';
+import BN from 'bn.js';
 import { LaunchpadService } from '../../src/services/launchpadService.js';
+import { config } from '../../src/config.js';
 
 const MINT = new PublicKey('SoLo9oxzLDpcq1dpqAgMwgce5WqkRDtNXK7EPnbmeta');
 
@@ -51,5 +53,125 @@ describe('LaunchpadService.getTokenAllocationBreakdown', () => {
     expect(breakdown.version).toBe('v0.7');
     expect(breakdown.launchAddress?.equals(launchAddress)).toBe(true);
     expect(breakdown.totalNonCirculating.isZero()).toBe(true);
+  });
+});
+
+describe('LaunchpadService.getLiveLaunches', () => {
+  const LAUNCH = new PublicKey('5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE');
+  const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+
+  function fakeProgram(launches: any[], fundingRecords: any[] = [], calls = { launch: 0, fundingRecord: 0 }) {
+    return {
+      account: {
+        launch: { all: async () => { calls.launch++; return launches; } },
+        fundingRecord: { all: async () => { calls.fundingRecord++; return fundingRecords; } },
+      },
+    };
+  }
+
+  afterEach(() => setSystemTime());
+
+  function serviceWith(programs: { v06?: any; v07?: any; v08?: any }) {
+    const svc = new LaunchpadService();
+    (svc as any).clientV06 = { launchpad: programs.v06 ?? fakeProgram([]) };
+    (svc as any).clientV07 = { launchpad: programs.v07 ?? fakeProgram([]) };
+    (svc as any).clientV08 = { launchpad: programs.v08 ?? fakeProgram([]) };
+    (svc as any).getMintDecimals = async () => 6;
+    return svc;
+  }
+
+  const STARTED = Math.floor(Date.now() / 1000) - 60 * 60;
+  const DURATION = 4 * 24 * 60 * 60;
+  const liveLaunch = {
+    publicKey: LAUNCH,
+    account: {
+      state: { live: {} },
+      baseMint: MINT,
+      quoteMint: USDC,
+      minimumRaiseAmount: new BN('500000000000'),
+      unixTimestampStarted: new BN(STARTED),
+      secondsForLaunch: DURATION,
+    },
+  };
+
+  it('aggregates funding records for open live launches only', async () => {
+    const completed = { ...liveLaunch, account: { ...liveLaunch.account, state: { complete: {} } } };
+    // Still `live` on-chain, but its close time passed and nobody called closeLaunch.
+    const pastClose = {
+      ...liveLaunch,
+      account: { ...liveLaunch.account, unixTimestampStarted: new BN(STARTED - 2 * DURATION) },
+    };
+    const calls = { launch: 0, fundingRecord: 0 };
+    const svc = serviceWith({
+      v07: fakeProgram([liveLaunch, completed, pastClose], [
+        { account: { committedAmount: new BN('1500000') } },
+        { account: { committedAmount: new BN('250000000') } },
+        { account: { committedAmount: new BN(0) } },
+      ], calls),
+    });
+
+    const { launches } = await svc.getLiveLaunches();
+
+    expect(launches).toEqual([{
+      launchAddress: LAUNCH.toBase58(),
+      version: 'v0.7',
+      tokenAddress: MINT.toBase58(),
+      quoteMint: USDC.toBase58(),
+      quoteDecimals: 6,
+      committerCount: 2,
+      totalCommitted: '251.5',
+      totalCommittedRaw: '251500000',
+      minimumRaise: '500000',
+      minimumRaiseRaw: '500000000000',
+      closeTime: STARTED + DURATION,
+    }]);
+    // Funding records are read for the open launch only, not the expired one.
+    expect(calls.fundingRecord).toBe(1);
+  });
+
+  it('shares one scan per TTL window and drops launches the moment they close', async () => {
+    const now = Date.now();
+    setSystemTime(new Date(now));
+    const closingSoon = {
+      ...liveLaunch,
+      account: {
+        ...liveLaunch.account,
+        unixTimestampStarted: new BN(Math.floor(now / 1000) - DURATION + 60),
+      },
+    };
+    const calls = { launch: 0, fundingRecord: 0 };
+    const svc = serviceWith({ v08: fakeProgram([closingSoon], [], calls) });
+
+    // Concurrent callers share the in-flight scan.
+    const [a, b] = await Promise.all([svc.getLiveLaunches(), svc.getLiveLaunches()]);
+    expect(a.launches).toHaveLength(1);
+    expect(b).toEqual(a);
+    expect(calls.launch).toBe(1);
+
+    // Within the TTL but past the close time: served from cache, launch filtered out.
+    setSystemTime(new Date(now + 120_000));
+    expect((await svc.getLiveLaunches()).launches).toEqual([]);
+    expect(calls.launch).toBe(1);
+
+    // After the TTL: rescanned.
+    setSystemTime(new Date(now + config.cache.liveLaunchesTTL + 1));
+    await svc.getLiveLaunches();
+    expect(calls.launch).toBe(2);
+  });
+
+  it('propagates RPC failures instead of serving an empty list, and does not cache them', async () => {
+    let fail = true;
+    const svc = serviceWith({
+      v06: {
+        account: {
+          launch: { all: async () => { if (fail) throw new Error('RPC connection refused'); return []; } },
+          fundingRecord: { all: async () => [] },
+        },
+      },
+    });
+
+    await expect(svc.getLiveLaunches()).rejects.toThrow('RPC connection refused');
+    fail = false;
+    expect((await svc.getLiveLaunches()).launches).toEqual([]);
   });
 });
