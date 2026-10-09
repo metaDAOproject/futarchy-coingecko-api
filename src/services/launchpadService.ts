@@ -21,6 +21,7 @@ import {
 import { getAccount, getAssociatedTokenAddress, getMint } from '@solana/spl-token';
 import { isTokenAccountAbsent } from '../utils/solanaErrors.js';
 import { config } from '../config.js';
+import { createSolanaConnection } from '../utils/solanaConnection.js';
 import BN from 'bn.js';
 import { logger } from '../utils/logger.js';
 
@@ -147,7 +148,7 @@ export class LaunchpadService {
   private mintDecimals = new Map<string, Promise<number>>();
 
   constructor() {
-    this.connection = new Connection(config.solana.rpcUrl, 'confirmed');
+    this.connection = createSolanaConnection();
     
     // Create a dummy wallet for read-only operations
     let wallet: Wallet;

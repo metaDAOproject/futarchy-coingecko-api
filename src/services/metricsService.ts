@@ -76,6 +76,12 @@ export const activeDaosCount = new client.Gauge({
   registers: [register],
 });
 
+export const daoSnapshotLastSuccess = new client.Gauge({
+  name: 'futarchy_dao_snapshot_last_success_timestamp_seconds',
+  help: 'Unix timestamp of the last successful on-chain DAO/pool snapshot refresh (alert on time() - this)',
+  registers: [register],
+});
+
 // ============================================
 // METRICS SERVICE CLASS
 // ============================================
@@ -146,10 +152,11 @@ export class MetricsService {
   }
 
   /**
-   * Update business metrics
+   * A DAO/pool snapshot refresh succeeded with `count` served DAOs.
    */
-  setActiveDaosCount(count: number): void {
+  markDaoSnapshotRefreshed(count: number): void {
     activeDaosCount.set(count);
+    daoSnapshotLastSuccess.set(Date.now() / 1000);
   }
 
   /**
