@@ -34,6 +34,14 @@ describe('Rate limiting', () => {
       expect(Number(overflow.headers['retry-after'])).toBeGreaterThan(0);
     });
 
+    it('counts requests rejected for repeated query parameters against the quota', async () => {
+      config.server.rateLimit.maxRequests = 1;
+      const app = createApp({ services: createTestServices() });
+
+      expect((await request(app).get('/dexscreener/asset?id=a&id=b')).status).toBe(400);
+      expect((await request(app).get('/dexscreener/asset?id=a&id=b')).status).toBe(429);
+    });
+
     it('never rate-limits the container probes', async () => {
       config.server.rateLimit.maxRequests = 1;
       const app = createApp({ services: createTestServices() });

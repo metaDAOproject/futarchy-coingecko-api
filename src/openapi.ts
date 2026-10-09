@@ -140,7 +140,7 @@ export const openApiSpec = {
       '',
       '**Rate limits.** Anonymous clients get 60 requests per minute per IP. Trusted partners send an `X-API-Key` header and get a higher limit; an unknown key is rejected with 401 `INVALID_API_KEY`. Rate-limited responses carry `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset` (seconds); a 429 also carries `Retry-After` (seconds). Container probes (`/health/startup`, `/health/ready`, `/health/live`) are not rate limited.',
       '',
-      '**Caching.** Successful data responses are sent with `Cache-Control: public, max-age=30`. Errors, health and metrics responses are `Cache-Control: no-store`, so a CDN never pins an outage.',
+      '**Caching.** Successful data responses are sent with `Cache-Control: private, max-age=30` (client-side reuse only; responses carry per-caller rate-limit headers). Errors, health and metrics responses are `Cache-Control: no-store`.',
       '',
       '**Serving invariant.** Infrastructure failures (Solana RPC, served database) return a 5xx. The API never answers 200 with zero, empty, or placeholder financial data because a dependency failed. Retry on 5xx; treat a 200 as authoritative.',
       '',
@@ -650,8 +650,8 @@ export const openApiSpec = {
 
     headers: {
       CacheControlPublic: {
-        description: '`public, max-age=30` on successful data responses.',
-        schema: { type: 'string', examples: ['public, max-age=30'] },
+        description: '`private, max-age=30` on successful data responses.',
+        schema: { type: 'string', examples: ['private, max-age=30'] },
       },
       CacheControlNoStore: {
         description: '`no-store` on errors, health and metrics responses.',

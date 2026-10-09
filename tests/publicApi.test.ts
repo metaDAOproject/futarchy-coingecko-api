@@ -24,10 +24,17 @@ describe('Public API surface', () => {
     const health = await request(app).get('/health');
 
     expect(data.status).toBe(200);
-    expect(data.headers['cache-control']).toBe('public, max-age=30');
+    expect(data.headers['cache-control']).toBe('private, max-age=30');
     expect(badRequest.status).toBe(400);
     expect(badRequest.headers['cache-control']).toBe('no-store');
     expect(health.headers['cache-control']).toBe('no-store');
+
+    // Express also routes mixed-case and trailing-slash forms; they must not be cached either.
+    for (const path of ['/API/Health/', '/Health/live']) {
+      const res = await request(app).get(path);
+      expect(res.status).toBe(200);
+      expect(res.headers['cache-control']).toBe('no-store');
+    }
   });
 
   it('rejects a repeated query parameter with 400 instead of failing on an array', async () => {
