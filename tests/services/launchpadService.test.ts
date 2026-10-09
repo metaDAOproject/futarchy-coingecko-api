@@ -256,4 +256,84 @@ describe('LaunchpadService batched allocation reads', () => {
     expect(await svc.getLaunchByBaseMint(MINT)).toBeNull();
     expect(reads).toBe(1);
   });
+
+  describe('decoding real launch accounts', () => {
+    const GRANTEE = Keypair.generate().publicKey;
+    const RECIPIENT = Keypair.generate().publicKey;
+
+    // Default value for every field of an Anchor (0.29 IDL) type.
+    const defaultFor = (type: any): unknown => {
+      if (typeof type === 'string') {
+        if (type === 'publicKey') return PublicKey.default;
+        if (type === 'bool') return false;
+        if (/^[ui](8|16|32)$/.test(type)) return 0;
+        return new BN(0); // u64 / i64 / u128
+      }
+      if ('option' in type) return null;
+      if ('vec' in type) return [];
+      if ('array' in type) return Array.from({ length: type.array[1] }, () => defaultFor(type.array[0]));
+      return { live: {} }; // the only defined type in Launch is the LaunchState enum
+    };
+
+    async function launchAccount(svc: LaunchpadService, version: 'v0.6' | 'v0.7', fields: Record<string, unknown>) {
+      const program = (svc as any)[version === 'v0.7' ? 'clientV07' : 'clientV06'].launchpad;
+      const idlFields = program.idl.accounts.find((a: any) => a.name === 'launch').type.fields;
+      const account = Object.fromEntries(idlFields.map((f: any) => [f.name, defaultFor(f.type)]));
+      const data = await program.coder.accounts.encode('launch', { ...account, ...fields });
+      return { data, owner: program.programId, lamports: 1, executable: false };
+    }
+
+    const lookup = async (svc: LaunchpadService, v07: unknown, v06: unknown) => {
+      (svc as any).connection = { getMultipleAccountsInfo: async () => [v07, v06] };
+      return svc.getLaunchByBaseMint(MINT);
+    };
+
+    it('decodes a v0.7 launch, including its additional-token fields', async () => {
+      const svc = new LaunchpadService();
+      const v07 = await launchAccount(svc, 'v0.7', {
+        baseMint: MINT, dao: DAO, performancePackageGrantee: GRANTEE,
+        performancePackageTokenAmount: new BN(123), additionalTokensAmount: new BN(456),
+        additionalTokensRecipient: RECIPIENT, additionalTokensClaimed: true, state: { complete: {} },
+      });
+
+      const launch = (await lookup(svc, v07, null))!;
+
+      expect(launch.version).toBe('v0.7');
+      expect(launch.launchAddress.equals(svc.getLaunchAddressV07(MINT))).toBe(true);
+      expect(launch.baseMint.equals(MINT)).toBe(true);
+      expect(launch.dao!.equals(DAO)).toBe(true);
+      expect(launch.performancePackageGrantee.equals(GRANTEE)).toBe(true);
+      expect(launch.performancePackageTokenAmount.toString()).toBe('123');
+      expect(launch.additionalTokensAmount!.toString()).toBe('456');
+      expect(launch.additionalTokensRecipient!.equals(RECIPIENT)).toBe(true);
+      expect(launch.additionalTokensClaimed).toBe(true);
+      expect(launch.state).toEqual({ complete: {} });
+    });
+
+    it('decodes a v0.6 launch at the v0.6 address', async () => {
+      const svc = new LaunchpadService();
+      const v06 = await launchAccount(svc, 'v0.6', {
+        baseMint: MINT, dao: DAO, performancePackageTokenAmount: new BN(789),
+      });
+
+      const launch = (await lookup(svc, null, v06))!;
+
+      expect(launch.version).toBe('v0.6');
+      expect(launch.launchAddress.equals(svc.getLaunchAddressV06(MINT))).toBe(true);
+      expect(launch.dao!.equals(DAO)).toBe(true);
+      expect(launch.performancePackageTokenAmount.toString()).toBe('789');
+      expect(launch.additionalTokensAmount).toBeUndefined();
+    });
+
+    it('prefers the v0.7 launch when both versions exist', async () => {
+      const svc = new LaunchpadService();
+      const v07 = await launchAccount(svc, 'v0.7', { baseMint: MINT, performancePackageTokenAmount: new BN(7) });
+      const v06 = await launchAccount(svc, 'v0.6', { baseMint: MINT, performancePackageTokenAmount: new BN(6) });
+
+      const launch = (await lookup(svc, v07, v06))!;
+
+      expect(launch.version).toBe('v0.7');
+      expect(launch.performancePackageTokenAmount.toString()).toBe('7');
+    });
+  });
 });
