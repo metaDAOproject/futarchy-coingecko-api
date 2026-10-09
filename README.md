@@ -425,7 +425,9 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `TRUST_PROXY_HOPS` | Reverse-proxy hops in front of the API (needed for per-IP rate limiting behind a LB) | `0` |
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
-| `CACHE_TICKERS_TTL` | On-chain data cache TTL (ms) | `55000` |
+| `CACHE_TICKERS_TTL` | On-chain DAO/pool snapshot TTL (ms); older snapshots refresh in the background | `55000` |
+| `CACHE_TICKERS_MAX_STALE` | Max age (ms) of a snapshot served while refreshing; past it requests wait and fail (5xx) if the RPC is down | `300000` |
+| `RPC_TIMEOUT_MS` | Per-request Solana RPC timeout (ms) | `20000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | **Served indexer DB (required — the only database this API uses)** | | |
 | `DATABASE_PG_URL` | Read-only connection to the served indexer DB (Meteora, tickers, DexScreener, first-trade-dates). **Required** — `/api/market-data`, `/api/tickers`, `/cmc/summary`, `/cmc/ticker`, and the DexScreener routes return 503 without it. | — |

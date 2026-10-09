@@ -2,6 +2,8 @@ import { PublicKey } from '@solana/web3.js';
 export const config = {
   solana: {
     rpcUrl: process.env.RPCPOOL_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
+    // Per-request RPC timeout (ms). Generous enough for getProgramAccounts scans.
+    rpcTimeoutMs: parseInt(process.env.RPC_TIMEOUT_MS || '20000'),
   },
   server: {
     port: parseInt(process.env.PORT || '3000'),
@@ -36,6 +38,11 @@ export const config = {
     // full DAO RPC scan from ~6x/minute to ~1x/minute.
     // Lower = more real-time prices but more RPC calls.
     tickersTTL: parseInt(process.env.CACHE_TICKERS_TTL || '55000'),
+    // Once the DAO snapshot is older than tickersTTL it is refreshed in the
+    // background while the previous snapshot keeps being served, up to this
+    // age (ms). Past it, requests wait for a fresh scan and fail (5xx) if the
+    // RPC is down, rather than serve prices older than this.
+    tickersMaxStale: parseInt(process.env.CACHE_TICKERS_MAX_STALE || '300000'),
     // TTL for the /api/launches/live snapshot (default: 5 minutes). Each refresh
     // scans every launch account plus the funding records of each live launch.
     liveLaunchesTTL: parseInt(process.env.CACHE_LIVE_LAUNCHES_TTL || '300000'),
