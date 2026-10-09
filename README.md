@@ -6,6 +6,10 @@ A multi-aggregator DEX API for the Futarchy protocol that automatically discover
 
 **Base URL:** `https://your-api-domain.com`
 
+**Reference:** `GET /docs` renders the full API reference, and `GET /openapi.json`
+serves the machine-readable OpenAPI 3.1 contract (`src/openapi.ts`). A test
+fails if the spec documents a route the app doesn't serve.
+
 ### Versioning
 
 Every data endpoint is served under a version prefix: `/v1/api/tickers`,
@@ -15,8 +19,8 @@ New integrations should use the versioned URLs.
 - **Unversioned paths** (`/api/tickers`, `/cmc/summary`, …) are a frozen alias
   of v1, kept so existing partner integrations keep working. The paths below
   are written unversioned; prefix them with `/v1`.
-- **Not versioned:** health, probe and metrics endpoints (`/health*`,
-  `/api/health`, `/metrics`, `/`). They are operational, not part of the API
+- **Not versioned:** health, probe, metrics and docs endpoints (`/health*`,
+  `/api/health`, `/metrics`, `/docs`, `/openapi.json`, `/`). They are operational, not part of the API
   contract.
 - **Breaking changes** ship as a new version (`/v2/...`). Earlier versions are
   left unchanged.
@@ -373,11 +377,13 @@ on-chain state `live` with a close time in the future — read directly from Sol
 | `GET /health/live` | Liveness probe: 200 whenever the process can respond (no dependency checks) |
 | `GET /health` | Process status and uptime (no dependency checks) |
 | `GET /api/health` | Detailed status: served DB connectivity, ETL data contract, and data freshness |
-| `GET /metrics` | Prometheus metrics (HTTP, served-DB health gauges, heartbeat) |
+| `GET /metrics` | Prometheus metrics (HTTP, served-DB health gauges, heartbeat). Requires `Authorization: Bearer <METRICS_TOKEN>` when `METRICS_TOKEN` is set |
 
-`/api/health` always returns 200 and reports `status: "degraded"` (with a
-`message`) when the served DB is unreachable, the served-data contract check
-fails, or the freshness query fails. Use it for dashboards, not probes.
+`/api/health` returns `200` when healthy and `503` with `status: "degraded"`
+(and a `message`) when the served DB is unreachable, the served-data contract
+check fails, or the freshness query fails. Use it for dashboards and uptime
+monitors, not container probes. Don't point a Northflank liveness probe at it:
+a 503 there would restart containers during a DB outage.
 
 #### Container probes (Northflank)
 
@@ -443,13 +449,16 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `SOLANA_WS_URL` / `RPCPOOL_WS_URL` | Solana WebSocket endpoint | `wss://api.mainnet-beta.solana.com` |
 | **Server** | | |
 | `PORT` | Server port | `3000` |
-| `SERVER_REQUEST_TIMEOUT` | Request timeout (ms) | `300000` |
+| `SERVER_REQUEST_TIMEOUT` | Max time (ms) to respond; slower requests get `503 REQUEST_TIMEOUT` | `30000` |
+| `METRICS_TOKEN` | Bearer token required by `GET /metrics` (open, with a startup warning, when unset) | — |
 | `TRUST_PROXY_HOPS` | Reverse-proxy hops in front of the API (needed for per-IP rate limiting behind a LB) | `0` |
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
 | `CACHE_TICKERS_TTL` | On-chain DAO/pool snapshot TTL (ms); older snapshots refresh in the background | `55000` |
 | `CACHE_TICKERS_MAX_STALE` | Max age (ms) of a snapshot served while refreshing; past it requests wait and fail (5xx) if the RPC is down | `300000` |
 | `RPC_TIMEOUT_MS` | Per-request Solana RPC timeout (ms) | `20000` |
+| `CACHE_CONTROL_MAX_AGE` | `Cache-Control` max-age (seconds) on successful data responses | `30` |
+| `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing. Keep it + 15s under the container's termination grace period | `10000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | **Served indexer DB (required — the only database this API uses)** | | |
 | `DATABASE_PG_URL` | Read-only connection to the served indexer DB (Meteora, tickers, DexScreener, first-trade-dates). **Required** — `/api/market-data`, `/api/tickers`, `/cmc/summary`, `/cmc/ticker`, and the DexScreener routes return 503 without it. | — |
@@ -528,6 +537,24 @@ The DexScreener adapter reads **directly from the external indexer DB** (`v0_6_s
 - **Trusted partners:** 600 requests per minute per key (configurable via `TRUSTED_RATE_LIMIT_MAX`). Send the issued key in the `X-API-Key` header. Each key has its own bucket — partners do not share quota.
 - Requests sent with an `X-API-Key` header that does not match the server-side allowlist receive `401 Unauthorized` with `code: "INVALID_API_KEY"`.
 - Keys are issued out-of-band by the team. Contact us if you need elevated access.
+- Every rate-limited response carries `RateLimit-Limit`, `RateLimit-Remaining`
+  and `RateLimit-Reset` (seconds) headers; a `429` also carries `Retry-After`.
+- If requests arrive with `X-Forwarded-For` while `TRUST_PROXY_HOPS=0`, the API
+  logs a one-time warning, since every client then shares the proxy's bucket.
+
+## Caching and CORS
+
+- Successful data responses send `Cache-Control: private, max-age=30`
+  (`CACHE_CONTROL_MAX_AGE`), so a client can reuse a response for 30s. It's
+  `private`, not `public`, because responses carry per-caller headers
+  (`RateLimit-*`, `X-Request-Id`) that a shared cache would replay to other
+  callers. Errors, health, probe and metrics responses send `no-store`.
+- CORS is open for read-only use: any origin, `GET`/`OPTIONS`, and the
+  `X-API-Key` and `X-Request-Id` request headers. Preflight `OPTIONS` requests
+  are answered directly with `204` and don't count toward the rate limit.
+
+Numeric settings are validated at startup; an invalid value (e.g. `PORT=30s`)
+exits with an error instead of silently becoming `NaN`.
 
 ## Error Handling
 
@@ -541,10 +568,11 @@ The DexScreener adapter reads **directly from the external indexer DB** (`v0_6_s
 
 | Code | Description |
 |------|-------------|
-| `400` | Bad Request (missing/invalid parameters) |
+| `400` | Bad Request (missing/invalid parameters, or a repeated query parameter) |
 | `401` | Unauthorized (invalid `X-API-Key`) |
-| `404` | Not Found |
+| `404` | Not Found (unknown routes also answer in this JSON shape, `code: "NOT_FOUND"`) |
 | `429` | Rate limit exceeded |
+| `503` | `code: "REQUEST_TIMEOUT"` when the response took longer than `SERVER_REQUEST_TIMEOUT` |
 | `503` | Service unavailable (DB not connected) |
 | `500` | Internal server error |
 

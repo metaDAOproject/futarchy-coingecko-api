@@ -10,6 +10,7 @@ import { createLaunchesRouter } from './launches.js';
 
 import { createDexScreenerRouter } from './dexscreener.js';
 import { createRootRouter } from './root.js';
+import { createDocsRouter } from './docs.js';
 import type { ServiceGetters } from './types.js';
 
 export type { ServiceGetters } from './types.js';
@@ -138,11 +139,12 @@ export function createApiRoutes(
   return router;
 }
 
-/** Operational endpoints: health, metrics, API index. Not versioned. */
+/** Operational endpoints: health, metrics, docs, API index. Not versioned. */
 export function createInfraRoutes(services: ServiceGetters): Router {
   const router = Router();
   router.use(createHealthRouter(services));
   router.use(createMetricsRouter(services));
+  router.use(createDocsRouter());
   router.use(createRootRouter(services));
   return router;
 }

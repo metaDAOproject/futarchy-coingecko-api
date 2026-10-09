@@ -4,6 +4,7 @@ import { requestIdMiddleware } from './middleware/requestId.js';
 import { errorHandler, asyncHandler, AppError } from './middleware/errorHandler.js';
 import { metricsService } from './services/metricsService.js';
 import { config } from './config.js';
+import { logger } from './utils/logger.js';
 import { createApiRoutes, createInfraRoutes } from './routes/index.js';
 import { createProbeRouter } from './routes/health.js';
 import { createServiceGetters, type Services } from './routes/types.js';
@@ -37,7 +38,17 @@ function createRateLimitMiddleware() {
   }, SWEEP_INTERVAL_MS);
   sweep.unref?.();
 
+  let warnedAboutProxy = false;
+
   return (req: Request, res: Response, next: NextFunction): void => {
+    // Behind a proxy with TRUST_PROXY_HOPS=0, req.ip is the proxy's address, so
+    // every anonymous client shares ONE rate-limit bucket — a handful of
+    // pollers would 429 everyone. Surface the misconfiguration once.
+    if (!warnedAboutProxy && config.server.trustProxyHops === 0 && req.headers['x-forwarded-for']) {
+      warnedAboutProxy = true;
+      logger.warn('Requests carry X-Forwarded-For but TRUST_PROXY_HOPS=0: all clients share the proxy IP rate-limit bucket. Set TRUST_PROXY_HOPS to the number of proxies in front of the API.');
+    }
+
     const apiKey = req.header('x-api-key');
     let tier: { windowMs: number; maxRequests: number };
     let bucketKey: string;
@@ -56,22 +67,39 @@ function createRateLimitMiddleware() {
     }
 
     const now = Date.now();
-    const limit = buckets.get(bucketKey);
-
+    let limit = buckets.get(bucketKey);
     if (!limit || now > limit.resetTime) {
-      buckets.set(bucketKey, { count: 1, resetTime: now + tier.windowMs });
-      next();
-      return;
+      limit = { count: 0, resetTime: now + tier.windowMs };
+      buckets.set(bucketKey, limit);
     }
 
+    // IETF RateLimit header fields, so clients can pace themselves.
+    const resetSeconds = Math.max(0, Math.ceil((limit.resetTime - now) / 1000));
+    res.setHeader('RateLimit-Limit', tier.maxRequests);
+    res.setHeader('RateLimit-Reset', resetSeconds);
+
     if (limit.count >= tier.maxRequests) {
-      res.status(429).json({ error: 'Too many requests' });
+      res.setHeader('RateLimit-Remaining', 0);
+      res.setHeader('Retry-After', resetSeconds);
+      res.status(429).json({ error: 'Too many requests', code: 'RATE_LIMITED', requestId: req.requestId });
       return;
     }
 
     limit.count++;
+    res.setHeader('RateLimit-Remaining', tier.maxRequests - limit.count);
     next();
   };
+}
+
+/**
+ * Bounded metrics label for a matched request: its API version prefix (from
+ * the URL, since Express has restored `req.baseUrl` by the time an error
+ * response finishes) plus the matched route pattern. Keeps /v1 and
+ * unversioned traffic distinguishable for deprecation decisions.
+ */
+function routeLabel(req: Request): string {
+  const version = req.originalUrl.match(/^\/v\d+(?=[/?]|$)/)?.[0] ?? '';
+  return version + [req.route.path].flat().join('|');
 }
 
 function createMetricsMiddleware() {
@@ -87,9 +115,12 @@ function createMetricsMiddleware() {
     res.on('finish', () => {
       metricsService.decrementHttpRequestsInFlight();
       const durationSeconds = (Date.now() - startTime) / 1000;
+      // Label by the matched route PATTERN (`/api/supply/:mintAddress/total`),
+      // never the requested URL, and give unmatched requests one shared label,
+      // so arbitrary URLs can't create unbounded Prometheus series.
       metricsService.recordHttpRequest(
         req.method,
-        req.path,
+        req.route ? routeLabel(req) : 'unmatched',
         res.statusCode,
         durationSeconds,
         req.clientTier ?? 'anon',
@@ -98,6 +129,90 @@ function createMetricsMiddleware() {
 
     next();
   };
+}
+
+// Operational endpoints whose responses must never be cached.
+// Case-insensitive with optional trailing slash, matching Express's routing.
+const UNCACHEABLE_PATH = /^\/(health|metrics)(\/|$)|^\/api\/health\/?$/i;
+
+/**
+ * Response headers every public response gets: CORS (read-only, any origin),
+ * nosniff, and Cache-Control decided when the status is known: successful
+ * data GETs are `private` (client-side cache only) for `cacheMaxAgeSeconds`,
+ * everything else (errors, health, metrics) is no-store. `private`, not
+ * `public`, because responses carry per-caller headers (RateLimit-*,
+ * X-Request-Id) that a shared cache would replay to other callers. A route
+ * can still set its own Cache-Control.
+ */
+function createResponseHeadersMiddleware() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key, X-Request-Id');
+    res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const writeHead = res.writeHead;
+    res.writeHead = function (this: Response, ...args: unknown[]) {
+      if (!res.getHeader('Cache-Control')) {
+        const status = typeof args[0] === 'number' ? args[0] : res.statusCode;
+        const cacheable = req.method === 'GET' && status >= 200 && status < 300
+          && !UNCACHEABLE_PATH.test(req.originalUrl.split('?')[0]!);
+        res.setHeader('Cache-Control', cacheable
+          ? `private, max-age=${config.server.cacheMaxAgeSeconds}`
+          : 'no-store');
+      }
+      return (writeHead as (...a: unknown[]) => Response).apply(this, args);
+    } as typeof res.writeHead;
+
+    // CORS preflight: answer directly, before rate limiting.
+    if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Max-Age', '86400');
+      res.status(204).end();
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Every endpoint takes each query parameter at most once. A repeated one
+ * (`?id=a&id=b`) parses to an array, which the string-typed handlers would
+ * otherwise turn into a 500 or a confusing lookup.
+ */
+/**
+ * Answer 503 REQUEST_TIMEOUT when a handler hasn't responded within
+ * `requestTimeout`, so a client gets a clear, retryable error instead of a
+ * hung connection. The handler keeps running; anything it writes later is
+ * dropped (see errorHandler).
+ */
+function createRequestTimeoutMiddleware() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    // SERVER_REQUEST_TIMEOUT=0 disables the timeout, as it always has.
+    if (config.server.requestTimeout === 0) {
+      next();
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (res.headersSent) return;
+      logger.warn('Request timed out', { requestId: req.requestId, path: req.originalUrl });
+      res.status(503).json({ error: 'Request timed out', code: 'REQUEST_TIMEOUT', requestId: req.requestId });
+    }, config.server.requestTimeout);
+    timer.unref?.();
+    const clear = () => clearTimeout(timer);
+    res.on('finish', clear);
+    res.on('close', clear);
+    next();
+  };
+}
+
+function rejectRepeatedQueryParams(req: Request, _res: Response, next: NextFunction): void {
+  for (const [key, value] of Object.entries(req.query)) {
+    if (typeof value !== 'string') {
+      throw AppError.badRequest(`Query parameter '${key}' must be given exactly once`, 'INVALID_QUERY_PARAMETER');
+    }
+  }
+  next();
 }
 
 export function createApp(options: AppOptions): Application {
@@ -112,16 +227,11 @@ export function createApp(options: AppOptions): Application {
   if (config.server.trustProxyHops > 0) {
     app.set('trust proxy', config.server.trustProxyHops);
   }
-
-  app.use(express.json());
+  app.disable('x-powered-by');
 
   app.use(requestIdMiddleware);
-
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    next();
-  });
+  app.use(createResponseHeadersMiddleware());
+  app.use(createRequestTimeoutMiddleware());
 
   // Container probes BEFORE metrics and the rate limiter (see createProbeRouter).
   app.use(createProbeRouter(serviceGetters));
@@ -129,11 +239,19 @@ export function createApp(options: AppOptions): Application {
   // Metrics BEFORE the rate limiter so 429/401 responses are recorded too.
   app.use(createMetricsMiddleware());
   app.use(createRateLimitMiddleware());
+  // After metrics and rate limiting, so rejected requests are counted and
+  // spend quota like any other.
+  app.use(rejectRepeatedQueryParams);
 
   // Health/metrics/index are operational and unversioned; the data API is
   // served under /v1 plus the legacy unversioned alias (see routes/index.ts).
   app.use(createInfraRoutes(serviceGetters));
   app.use(createApiRoutes(serviceGetters));
+
+  // JSON 404 (Express's default is an HTML page) in the same shape as errors.
+  app.use((req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not found', code: 'NOT_FOUND', requestId: req.requestId });
+  });
 
   app.use(errorHandler);
 

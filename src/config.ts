@@ -1,21 +1,55 @@
 import { PublicKey } from '@solana/web3.js';
+
+// Numeric env vars are validated at startup: a typo (e.g. "30s") must fail
+// fast, not become NaN — a NaN TTL silently disables caching, a NaN port or
+// rate limit breaks serving.
+function intEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    throw new Error(`${name} must be a non-negative integer, got "${raw}"`);
+  }
+  return value;
+}
+
+function fractionEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || value >= 1) {
+    throw new Error(`${name} must be a number in [0, 1), got "${raw}"`);
+  }
+  return value;
+}
+
 export const config = {
   solana: {
     rpcUrl: process.env.RPCPOOL_RPC_URL || process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com',
     // Per-request RPC timeout (ms). Generous enough for getProgramAccounts scans.
-    rpcTimeoutMs: parseInt(process.env.RPC_TIMEOUT_MS || '20000'),
+    rpcTimeoutMs: intEnv('RPC_TIMEOUT_MS', 20000),
   },
   server: {
-    port: parseInt(process.env.PORT || '3000'),
-    // Request timeout in milliseconds (default: 5 minutes)
-    requestTimeout: parseInt(process.env.SERVER_REQUEST_TIMEOUT || '300000'),
+    port: intEnv('PORT', 3000),
+    // Max time (ms) to produce a response; slower requests get a 503
+    // REQUEST_TIMEOUT instead of hanging the client (default: 30 seconds).
+    requestTimeout: intEnv('SERVER_REQUEST_TIMEOUT', 30000),
     // Keep-alive timeout in milliseconds (default: 5 minutes)
-    keepAliveTimeout: parseInt(process.env.SERVER_KEEP_ALIVE_TIMEOUT || '300000'),
+    keepAliveTimeout: intEnv('SERVER_KEEP_ALIVE_TIMEOUT', 300000),
     // Number of reverse-proxy hops in front of this process. Express uses it to
     // resolve the real client IP from X-Forwarded-For for per-IP rate limiting.
     // 0 = no proxy (req.ip is the socket peer). Use the exact hop count — a
     // blanket "trust everything" would let clients spoof their IP via XFF.
-    trustProxyHops: parseInt(process.env.TRUST_PROXY_HOPS || '0'),
+    trustProxyHops: intEnv('TRUST_PROXY_HOPS', 0),
+    // `Cache-Control: private, max-age=N` on successful data responses, so
+    // clients can reuse a response for N seconds. Errors and health/metrics are no-store.
+    cacheMaxAgeSeconds: intEnv('CACHE_CONTROL_MAX_AGE', 30),
+    // On SIGTERM, report not-ready and keep serving this long (ms) so the load
+    // balancer stops routing here before the listener closes. Kubernetes
+    // removes a terminating pod from its endpoints right away; this covers the
+    // propagation to the ingress. Keep drain + 15s close budget under the
+    // platform's termination grace period (Kubernetes default 30s).
+    shutdownDrainMs: intEnv('SHUTDOWN_DRAIN_MS', 10000),
     rateLimit: {
       windowMs: 60000, // 1 minute
       maxRequests: 60, // 60 requests per minute
@@ -28,7 +62,7 @@ export const config = {
     ),
     trustedRateLimit: {
       windowMs: 60_000,
-      maxRequests: parseInt(process.env.TRUSTED_RATE_LIMIT_MAX || '600'),
+      maxRequests: intEnv('TRUSTED_RATE_LIMIT_MAX', 600),
     },
   },
   cache: {
@@ -37,15 +71,15 @@ export const config = {
     // sub-minute TTL keeps every poll fresher than its cadence while cutting the
     // full DAO RPC scan from ~6x/minute to ~1x/minute.
     // Lower = more real-time prices but more RPC calls.
-    tickersTTL: parseInt(process.env.CACHE_TICKERS_TTL || '55000'),
+    tickersTTL: intEnv('CACHE_TICKERS_TTL', 55000),
     // Once the DAO snapshot is older than tickersTTL it is refreshed in the
     // background while the previous snapshot keeps being served, up to this
     // age (ms). Past it, requests wait for a fresh scan and fail (5xx) if the
     // RPC is down, rather than serve prices older than this.
-    tickersMaxStale: parseInt(process.env.CACHE_TICKERS_MAX_STALE || '300000'),
+    tickersMaxStale: intEnv('CACHE_TICKERS_MAX_STALE', 300000),
     // TTL for the /api/launches/live snapshot (default: 5 minutes). Each refresh
     // scans every launch account plus the funding records of each live launch.
-    liveLaunchesTTL: parseInt(process.env.CACHE_LIVE_LAUNCHES_TTL || '300000'),
+    liveLaunchesTTL: intEnv('CACHE_LIVE_LAUNCHES_TTL', 300000),
   },
   dex: {
     forkType: process.env.DEX_FORK_TYPE || 'Custom',
@@ -59,7 +93,7 @@ export const config = {
     .map(addr => new PublicKey(addr)),
   fees: {
     // Protocol fee rate (0.005 = 0.5%); used to report fee bps on DexScreener routes.
-    protocolFeeRate: parseFloat(process.env.PROTOCOL_FEE_RATE || '0.005'),
+    protocolFeeRate: fractionEnv('PROTOCOL_FEE_RATE', 0.005),
   },
   coinmarketcap: {
     // Optional allowlist of base-mint addresses exposed on the CoinMarketCap
@@ -96,13 +130,18 @@ export const config = {
     // Encrypts but does NOT authenticate the server — set only as a stopgap.
     sslNoVerify: process.env.DATABASE_PG_SSL_NO_VERIFY === 'true',
   },
+  metrics: {
+    // When set, GET /metrics requires `Authorization: Bearer <token>`.
+    // Unset leaves it open (a startup warning is logged).
+    token: process.env.METRICS_TOKEN || '',
+  },
   heartbeat: {
     // Background self-check cadence (served DB connectivity, data freshness,
     // contract drift). 0 disables the heartbeat entirely.
-    intervalMs: parseInt(process.env.HEARTBEAT_INTERVAL_MS || '60000'),
+    intervalMs: intEnv('HEARTBEAT_INTERVAL_MS', 60000),
     // Alert when the newest user_pool swap is older than this (seconds).
     // 0 disables the staleness alert (connectivity/contract alerts remain).
-    maxDataAgeSeconds: parseInt(process.env.HEARTBEAT_MAX_DATA_AGE_SECONDS || '21600'),
+    maxDataAgeSeconds: intEnv('HEARTBEAT_MAX_DATA_AGE_SECONDS', 21600),
     // Run the served-data contract check every Nth heartbeat tick.
     contractCheckEveryTicks: 10,
   },

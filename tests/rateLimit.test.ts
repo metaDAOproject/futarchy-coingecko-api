@@ -28,7 +28,18 @@ describe('Rate limiting', () => {
 
       const overflow = await request(app).get('/health');
       expect(overflow.status).toBe(429);
-      expect(overflow.body).toEqual({ error: 'Too many requests' });
+      expect(overflow.body).toMatchObject({ error: 'Too many requests', code: 'RATE_LIMITED' });
+      expect(overflow.headers['ratelimit-limit']).toBe('3');
+      expect(overflow.headers['ratelimit-remaining']).toBe('0');
+      expect(Number(overflow.headers['retry-after'])).toBeGreaterThan(0);
+    });
+
+    it('counts requests rejected for repeated query parameters against the quota', async () => {
+      config.server.rateLimit.maxRequests = 1;
+      const app = createApp({ services: createTestServices() });
+
+      expect((await request(app).get('/dexscreener/asset?id=a&id=b')).status).toBe(400);
+      expect((await request(app).get('/dexscreener/asset?id=a&id=b')).status).toBe(429);
     });
 
     it('never rate-limits the container probes', async () => {

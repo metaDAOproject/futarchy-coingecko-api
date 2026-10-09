@@ -48,6 +48,13 @@ export function errorHandler(
 ): void {
   const requestId = req.requestId || 'unknown';
 
+  // The response already went out (e.g. the request timed out while the
+  // handler was still running): log, but don't try to write a second one.
+  if (res.headersSent) {
+    logger.warn('Error after response was sent', { requestId, path: req.path, error: err.message });
+    return;
+  }
+
   if (err instanceof AppError) {
     logger.warn('Operational error', {
       requestId,
