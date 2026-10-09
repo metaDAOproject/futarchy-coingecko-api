@@ -129,6 +129,10 @@ export const config = {
     // Explicit opt-out of TLS server verification (legacy/self-signed setups).
     // Encrypts but does NOT authenticate the server — set only as a stopgap.
     sslNoVerify: process.env.DATABASE_PG_SSL_NO_VERIFY === 'true',
+    // Postgres cancels any statement running longer than this (ms), so a slow
+    // query can't hold one of the pool's 5 connections after its request has
+    // already timed out (SERVER_REQUEST_TIMEOUT, 30s). 0 disables it.
+    statementTimeoutMs: intEnv('DATABASE_PG_STATEMENT_TIMEOUT_MS', 25000),
   },
   metrics: {
     // When set, GET /metrics requires `Authorization: Bearer <token>`.

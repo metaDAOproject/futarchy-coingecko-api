@@ -465,6 +465,7 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `DATABASE_PG_SSL` | Enable SSL (server cert verified against system CAs) | `false` |
 | `DATABASE_PG_CA_CERT` | PEM CA cert content for private-CA verification | — |
 | `DATABASE_PG_SSL_NO_VERIFY` | Explicit opt-out of TLS verification (stopgap only) | `false` |
+| `DATABASE_PG_STATEMENT_TIMEOUT_MS` | Postgres cancels statements running longer than this (ms), so a slow query can't hold a pool connection after its request timed out. `0` disables | `25000` |
 | **Heartbeat** | | |
 | `HEARTBEAT_INTERVAL_MS` | Background self-check cadence (0 disables) | `60000` |
 | `HEARTBEAT_MAX_DATA_AGE_SECONDS` | Stale-data alert threshold (0 disables) | `21600` |
