@@ -7,7 +7,8 @@ import { logger } from '../utils/logger.js';
 
 function hasMetricsToken(req: Request): boolean {
   const header = req.header('authorization') ?? '';
-  const supplied = Buffer.from(header.startsWith('Bearer ') ? header.slice(7) : '');
+  // The auth scheme name is case-insensitive (RFC 9110); the token is not.
+  const supplied = Buffer.from(/^Bearer /i.test(header) ? header.slice(7) : '');
   const expected = Buffer.from(config.metrics.token);
   return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 }

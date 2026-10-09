@@ -58,6 +58,9 @@ describe('Metrics Routes', () => {
         expect(missing.headers['www-authenticate']).toBe('Bearer');
         expect(wrong.status).toBe(401);
         expect(right.status).toBe(200);
+        // The scheme name is case-insensitive; the token is not.
+        expect((await request(app).get('/metrics').set('Authorization', 'bearer scrape-secret')).status).toBe(200);
+        expect((await request(app).get('/metrics').set('Authorization', 'Bearer SCRAPE-SECRET')).status).toBe(401);
       } finally {
         config.metrics.token = '';
       }

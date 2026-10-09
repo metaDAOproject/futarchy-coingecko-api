@@ -34,7 +34,8 @@ async function main(): Promise<void> {
 
   // Backstop only: the request-timeout middleware answers 503 at
   // requestTimeout; this closes sockets that stay silent a little longer.
-  server.timeout = config.server.requestTimeout + 5_000;
+  // 0 keeps meaning "no timeout".
+  server.timeout = config.server.requestTimeout === 0 ? 0 : config.server.requestTimeout + 5_000;
   server.keepAliveTimeout = config.server.keepAliveTimeout;
   server.headersTimeout = config.server.keepAliveTimeout + 1000;
 

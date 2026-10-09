@@ -137,7 +137,7 @@ function createResponseHeadersMiddleware() {
   return (req: Request, res: Response, next: NextFunction): void => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-API-Key, X-Request-Id');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key, X-Request-Id');
     res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After');
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
@@ -177,6 +177,11 @@ function createResponseHeadersMiddleware() {
  */
 function createRequestTimeoutMiddleware() {
   return (req: Request, res: Response, next: NextFunction): void => {
+    // SERVER_REQUEST_TIMEOUT=0 disables the timeout, as it always has.
+    if (config.server.requestTimeout === 0) {
+      next();
+      return;
+    }
     const timer = setTimeout(() => {
       if (res.headersSent) return;
       logger.warn('Request timed out', { requestId: req.requestId, path: req.originalUrl });

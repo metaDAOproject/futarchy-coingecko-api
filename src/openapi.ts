@@ -256,7 +256,7 @@ export const openApiSpec = {
           '400': {
             description: 'Missing or malformed parameter (`ValidationError`), or a repeated query parameter (`Error` with code `INVALID_QUERY_PARAMETER`).',
             headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-            content: { 'application/json': { schema: { oneOf: [ref('ValidationError'), ref('Error')] } } },
+            content: { 'application/json': { schema: { anyOf: [ref('ValidationError'), ref('Error')] } } },
           },
           '401': responseRef('Unauthorized'),
           '429': responseRef('TooManyRequests'),
@@ -264,7 +264,7 @@ export const openApiSpec = {
           '503': {
             description: 'Served database not connected (`{ error, message }`), or request timeout (`Error` with code `REQUEST_TIMEOUT`).',
             headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-            content: { 'application/json': { schema: { oneOf: [ref('ServiceUnavailableMessage'), ref('Error')] } } },
+            content: { 'application/json': { schema: { anyOf: [ref('ServiceUnavailableMessage'), ref('Error')] } } },
           },
         },
       },
@@ -557,7 +557,11 @@ export const openApiSpec = {
           '200': jsonOk('Healthy.', ref('DetailedHealth'), NO_STORE_HEADERS),
           '401': responseRef('Unauthorized'),
           '429': responseRef('TooManyRequests'),
-          '503': jsonOk('Degraded (same body, `status: "degraded"` with a `message`).', ref('DetailedHealth'), NO_STORE_HEADERS),
+          '503': jsonOk(
+            'Degraded (same body, `status: "degraded"` with a `message`), or `REQUEST_TIMEOUT` (`Error` body) if the checks took longer than the request timeout.',
+            { anyOf: [ref('DetailedHealth'), ref('Error')] },
+            NO_STORE_HEADERS,
+          ),
         },
       },
     },
@@ -614,6 +618,7 @@ export const openApiSpec = {
           },
           '401': responseRef('Unauthorized'),
           '429': responseRef('TooManyRequests'),
+          '503': responseRef('ServiceUnavailable'),
           '500': {
             description: 'Metrics could not be generated (plain-text body).',
             content: { 'text/plain': { schema: { type: 'string' } } },
@@ -719,7 +724,7 @@ export const openApiSpec = {
       DexScreenerBadRequest: {
         description: 'Missing/invalid parameter (bare `{ error }`), or a repeated query parameter (`Error` with code `INVALID_QUERY_PARAMETER`).',
         headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-        content: { 'application/json': { schema: { oneOf: [ref('SimpleError'), ref('Error')] } } },
+        content: { 'application/json': { schema: { anyOf: [ref('SimpleError'), ref('Error')] } } },
       },
       DexScreenerNotFound: {
         description: 'No matching data (`{ error: "Pair not found" }` / `{ error: "No blocks available" }`).',
@@ -729,7 +734,7 @@ export const openApiSpec = {
       DexScreenerUnavailable: {
         description: 'Served database not available (bare `{ error }`), or request timeout (`Error` with code `REQUEST_TIMEOUT`).',
         headers: { 'Cache-Control': headerRef('CacheControlNoStore') },
-        content: { 'application/json': { schema: { oneOf: [ref('SimpleError'), ref('Error')] } } },
+        content: { 'application/json': { schema: { anyOf: [ref('SimpleError'), ref('Error')] } } },
       },
       CmcSummary: jsonOk('Array of pair summaries.', { type: 'array', items: ref('CoinMarketCapSummaryPair') }),
       CmcTicker: jsonOk('Tickers keyed by `BASE_QUOTE` trading pair.', ref('CoinMarketCapTickerResponse')),
