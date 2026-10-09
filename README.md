@@ -315,7 +315,7 @@ on-chain state `live` with a close time in the future — read directly from Sol
     {
       "launchAddress": "…",
       "version": "v0.7",
-      "baseMint": "…",
+      "tokenAddress": "…",
       "quoteMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
       "quoteDecimals": 6,
       "committerCount": 412,
@@ -323,12 +323,16 @@ on-chain state `live` with a close time in the future — read directly from Sol
       "totalCommittedRaw": "251500000",
       "minimumRaise": "500000",
       "minimumRaiseRaw": "500000000000",
-      "closeTime": 1760345600
+      "closeTime": 1760345600,
+      "tokenName": "The Syndicate",
+      "tokenSymbol": "GANG"
     }
   ]
 }
 ```
 
+- `tokenAddress` — mint of the token being launched; `tokenName` / `tokenSymbol`
+  come from its Metaplex metadata (`null` if it has none).
 - `committerCount` / `totalCommitted` — count and sum of the launch's funding
   records with a non-zero `committedAmount` (one record per funder).
 - `minimumRaise` — the launch's on-chain `minimumRaiseAmount`.

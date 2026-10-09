@@ -111,7 +111,7 @@ describe('LaunchpadService.getLiveLaunches', () => {
     expect(launches).toEqual([{
       launchAddress: LAUNCH.toBase58(),
       version: 'v0.7',
-      baseMint: MINT.toBase58(),
+      tokenAddress: MINT.toBase58(),
       quoteMint: USDC.toBase58(),
       quoteDecimals: 6,
       committerCount: 2,

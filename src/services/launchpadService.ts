@@ -95,7 +95,8 @@ export interface LaunchData {
 export interface LiveLaunch {
   launchAddress: string;
   version: LaunchpadVersion | 'v0.8';
-  baseMint: string;
+  /** Mint of the token being launched (the launch's `baseMint`). */
+  tokenAddress: string;
   quoteMint: string;
   quoteDecimals: number;
   /** Number of funding records with a non-zero commitment (one record per funder). */
@@ -677,7 +678,7 @@ export class LaunchpadService {
         return {
           launchAddress: publicKey.toBase58(),
           version,
-          baseMint: account.baseMint.toBase58(),
+          tokenAddress: account.baseMint.toBase58(),
           quoteMint: account.quoteMint.toBase58(),
           quoteDecimals,
           committerCount,
