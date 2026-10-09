@@ -3,6 +3,7 @@ import request from 'supertest';
 import { createTestApp } from '../helpers/testApp.js';
 import type { ExternalDatabaseService } from '../../src/services/externalDatabaseService.js';
 import type { FutarchyService } from '../../src/services/futarchyService.js';
+import type { SolanaService } from '../../src/services/solanaService.js';
 import { PublicKey } from '@solana/web3.js';
 
 const BASE_MINT = new PublicKey(new Uint8Array(32).fill(1)).toBase58();
@@ -246,10 +247,60 @@ describe('DexScreener Routes', () => {
       expect(res.status).toBe(503);
     });
 
+    it.each([' ', '0x10', '1e3', '-1', '1.5'])('rejects fromBlock=%p as not a slot, before querying', async (fromBlock) => {
+      const app = createTestApp({ externalDatabaseService: extDbReturning([]) });
+      const res = await request(app).get('/dexscreener/events').query({ fromBlock, toBlock: 100 });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'INVALID_QUERY_PARAMETER', field: 'fromBlock' });
+    });
+
     it('rejects an out-of-order block range', async () => {
       const app = createTestApp({ externalDatabaseService: extDbReturning([]) });
       const res = await request(app).get('/dexscreener/events').query({ fromBlock: 100, toBlock: 10 });
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe('GET /dexscreener/pair', () => {
+    it('rejects a non-address id with 400 before querying the DB', async () => {
+      let queried = false;
+      const app = createTestApp({
+        externalDatabaseService: {
+          isAvailable: () => true,
+          query: async () => { queried = true; return { rows: [] }; },
+        } as unknown as ExternalDatabaseService,
+      });
+      const res = await request(app).get('/dexscreener/pair').query({ id: 'not-a-dao' });
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({ code: 'INVALID_QUERY_PARAMETER', field: 'id' });
+      expect(queried).toBe(false);
+    });
+  });
+
+  describe('GET /dexscreener/asset', () => {
+    it('fails 5xx when supply cannot be loaded, and does not cache the failure', async () => {
+      let supplyUp = false;
+      const app = createTestApp({
+        futarchyService: {
+          getTokenMetadata: async () => ({ name: 'Token', symbol: 'TKN' }),
+          getTokenDecimals: async () => 6,
+        } as unknown as FutarchyService,
+        solanaService: {
+          getSupplyInfo: async () => {
+            if (!supplyUp) throw new Error('RPC unavailable');
+            return { totalSupply: '1000', circulatingSupply: '400' };
+          },
+        } as unknown as SolanaService,
+      });
+
+      const down = await request(app).get('/dexscreener/asset').query({ id: BASE_MINT });
+      expect(down.status).toBeGreaterThanOrEqual(500);
+      expect(down.body).not.toHaveProperty('asset');
+
+      supplyUp = true;
+      const up = await request(app).get('/dexscreener/asset').query({ id: BASE_MINT });
+      expect(up.status).toBe(200);
+      expect(up.body.asset).toMatchObject({ id: BASE_MINT, symbol: 'TKN', totalSupply: 1000, circulatingSupply: 400 });
     });
   });
 

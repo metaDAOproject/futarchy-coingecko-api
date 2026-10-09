@@ -242,8 +242,12 @@ export class FutarchyService {
       const metadata = parseTokenMetadata(accountInfo.data, mintAddress);
       this.setCache(cacheKey, metadata);
       return metadata;
-    } catch {
+    } catch (error) {
       // Identification only — callers fall back to the mint address.
+      logger.warn('[Futarchy] Token metadata lookup failed; falling back to the mint address', {
+        mint: mintAddress.toString(),
+        error: error instanceof Error ? error.message : String(error),
+      });
       return null;
     }
   }

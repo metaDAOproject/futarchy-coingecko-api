@@ -7,11 +7,11 @@ export interface DexScreenerAsset {
   id: string;
   name: string;
   symbol: string;
-  totalSupply?: number;
-  circulatingSupply?: number;
+  totalSupply: number;
+  circulatingSupply: number;
   coinGeckoId?: string;
   coinMarketCapId?: string;
-  metadata?: Record<string, string>;
+  metadata: Record<string, string>;
 }
 
 export interface DexScreenerPool {

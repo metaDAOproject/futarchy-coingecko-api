@@ -24,7 +24,7 @@ export function createRootRouter(_services: ServiceGetters): Router {
         supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply (excludes team performance package)',
         live_launches: '/api/launches/live - Open launchpad raises: committer count, committed total, minimum raise, close time (cached 5 min)',
         health: '/health',
-        health_detailed: '/api/health - Comprehensive health with app DB and served ETL contract checks',
+        health_detailed: '/api/health - Served DB connectivity, ETL data contract and data freshness',
       },
       dexscreener: {
         description: 'DexScreener Adapter (v1.1) — requires DATABASE_PG_URL',
