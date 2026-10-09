@@ -51,7 +51,7 @@ describe('Health Routes', () => {
 
       const response = await request(degradedApp).get('/api/health');
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(503);
       expect(response.body.status).toBe('degraded');
       expect(response.body.servedDatabase.connected).toBe(false);
       expect(response.body.servedDatabase.servedDataContract.missing).toContain('connection');
@@ -86,6 +86,7 @@ describe('Health Routes', () => {
 
       const response = await request(degradedApp).get('/api/health');
 
+      expect(response.status).toBe(503);
       expect(response.body.status).toBe('degraded');
       expect(response.body.servedDatabase.freshness).toBeNull();
       expect(response.body.message).toContain('freshness');

@@ -10,7 +10,8 @@ export function createRootRouter(_services: ServiceGetters): Router {
     res.json({
       name: 'Futarchy AMM - CoinGecko API',
       version: '2.0.0',
-      documentation: 'https://docs.coingecko.com/reference/exchanges-list',
+      documentation: '/docs',
+      openapi: '/openapi.json',
       versioning: {
         current: 'v1',
         description: 'Every data endpoint below is served under a version prefix (e.g. /v1/api/tickers, /v1/cmc/summary). The unversioned paths are a frozen alias of v1 kept for existing integrations. Health, probe and metrics endpoints are not versioned. A deprecated version answers with Deprecation, Sunset and Link (rel="successor-version") headers.',

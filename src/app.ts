@@ -148,7 +148,7 @@ function createResponseHeadersMiddleware() {
   return (req: Request, res: Response, next: NextFunction): void => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-API-Key, X-Request-Id');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key, X-Request-Id');
     res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After');
     res.setHeader('X-Content-Type-Options', 'nosniff');
 
@@ -180,6 +180,32 @@ function createResponseHeadersMiddleware() {
  * (`?id=a&id=b`) parses to an array, which the string-typed handlers would
  * otherwise turn into a 500 or a confusing lookup.
  */
+/**
+ * Answer 503 REQUEST_TIMEOUT when a handler hasn't responded within
+ * `requestTimeout`, so a client gets a clear, retryable error instead of a
+ * hung connection. The handler keeps running; anything it writes later is
+ * dropped (see errorHandler).
+ */
+function createRequestTimeoutMiddleware() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    // SERVER_REQUEST_TIMEOUT=0 disables the timeout, as it always has.
+    if (config.server.requestTimeout === 0) {
+      next();
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (res.headersSent) return;
+      logger.warn('Request timed out', { requestId: req.requestId, path: req.originalUrl });
+      res.status(503).json({ error: 'Request timed out', code: 'REQUEST_TIMEOUT', requestId: req.requestId });
+    }, config.server.requestTimeout);
+    timer.unref?.();
+    const clear = () => clearTimeout(timer);
+    res.on('finish', clear);
+    res.on('close', clear);
+    next();
+  };
+}
+
 function rejectRepeatedQueryParams(req: Request, _res: Response, next: NextFunction): void {
   for (const [key, value] of Object.entries(req.query)) {
     if (typeof value !== 'string') {
@@ -205,6 +231,7 @@ export function createApp(options: AppOptions): Application {
 
   app.use(requestIdMiddleware);
   app.use(createResponseHeadersMiddleware());
+  app.use(createRequestTimeoutMiddleware());
 
   // Container probes BEFORE metrics and the rate limiter (see createProbeRouter).
   app.use(createProbeRouter(serviceGetters));

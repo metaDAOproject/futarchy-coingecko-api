@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'bun:test';
 import request from 'supertest';
 import { createTestApp } from '../helpers/testApp.js';
+import { config } from '../../src/config.js';
 
 const app = createTestApp();
 
@@ -50,6 +51,27 @@ describe('Metrics Routes', () => {
       const response = await request(app).get('/metrics');
 
       expect(response.text).toContain('futarchy_served_db_connected 1');
+    });
+  });
+
+  describe('METRICS_TOKEN', () => {
+    it('requires the bearer token when set', async () => {
+      config.metrics.token = 'scrape-secret';
+      try {
+        const missing = await request(app).get('/metrics');
+        const wrong = await request(app).get('/metrics').set('Authorization', 'Bearer nope');
+        const right = await request(app).get('/metrics').set('Authorization', 'Bearer scrape-secret');
+
+        expect(missing.status).toBe(401);
+        expect(missing.headers['www-authenticate']).toBe('Bearer');
+        expect(wrong.status).toBe(401);
+        expect(right.status).toBe(200);
+        // The scheme name is case-insensitive; the token is not.
+        expect((await request(app).get('/metrics').set('Authorization', 'bearer scrape-secret')).status).toBe(200);
+        expect((await request(app).get('/metrics').set('Authorization', 'Bearer SCRAPE-SECRET')).status).toBe(401);
+      } finally {
+        config.metrics.token = '';
+      }
     });
   });
 });

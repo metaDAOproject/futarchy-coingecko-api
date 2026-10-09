@@ -31,8 +31,9 @@ export const config = {
   },
   server: {
     port: intEnv('PORT', 3000),
-    // Request timeout in milliseconds (default: 5 minutes)
-    requestTimeout: intEnv('SERVER_REQUEST_TIMEOUT', 300000),
+    // Max time (ms) to produce a response; slower requests get a 503
+    // REQUEST_TIMEOUT instead of hanging the client (default: 30 seconds).
+    requestTimeout: intEnv('SERVER_REQUEST_TIMEOUT', 30000),
     // Keep-alive timeout in milliseconds (default: 5 minutes)
     keepAliveTimeout: intEnv('SERVER_KEEP_ALIVE_TIMEOUT', 300000),
     // Number of reverse-proxy hops in front of this process. Express uses it to
@@ -128,6 +129,11 @@ export const config = {
     // Explicit opt-out of TLS server verification (legacy/self-signed setups).
     // Encrypts but does NOT authenticate the server — set only as a stopgap.
     sslNoVerify: process.env.DATABASE_PG_SSL_NO_VERIFY === 'true',
+  },
+  metrics: {
+    // When set, GET /metrics requires `Authorization: Bearer <token>`.
+    // Unset leaves it open (a startup warning is logged).
+    token: process.env.METRICS_TOKEN || '',
   },
   heartbeat: {
     // Background self-check cadence (served DB connectivity, data freshness,
