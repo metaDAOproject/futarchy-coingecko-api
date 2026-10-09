@@ -176,14 +176,16 @@ export function createDexScreenerRouter(services: ServiceGetters): Router {
   // GET /dexscreener/events?fromBlock=:number&toBlock=:number
   // ---------------------------------------------------------------
   router.get('/dexscreener/events', asyncHandler(async (req: Request, res: Response) => {
+    // Digits only: Number() also reads '' and ' ' as 0, '0x10' as 16 and
+    // '1e3' as 1000, none of which is a slot the caller meant.
+    const isSlot = (value: unknown) => typeof value === 'string' && /^\d+$/.test(value);
     const fromBlock = Number(req.query.fromBlock);
     const toBlock = Number(req.query.toBlock);
 
-    // Number('') is 0, so an empty/missing bound must be rejected explicitly.
-    if (!req.query.fromBlock || !Number.isSafeInteger(fromBlock) || fromBlock < 0) {
+    if (!isSlot(req.query.fromBlock) || !Number.isSafeInteger(fromBlock)) {
       throw AppError.badRequest('fromBlock must be a non-negative integer', 'INVALID_QUERY_PARAMETER', 'fromBlock');
     }
-    if (!req.query.toBlock || !Number.isSafeInteger(toBlock)) {
+    if (!isSlot(req.query.toBlock) || !Number.isSafeInteger(toBlock)) {
       throw AppError.badRequest('toBlock must be a non-negative integer', 'INVALID_QUERY_PARAMETER', 'toBlock');
     }
 

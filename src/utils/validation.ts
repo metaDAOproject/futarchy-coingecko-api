@@ -134,11 +134,12 @@ export function parseDateParam(
     };
   }
 
-  // Validate it's an actual calendar date. `new Date('2024-02-31')` rolls over
-  // to March 2 instead of failing, so require the parse to round-trip; Postgres
-  // would otherwise reject the string and turn a client error into a 500.
+  // Validate it's an actual calendar date Postgres accepts, or it rejects the
+  // string and a client error becomes a 500. `new Date('2024-02-31')` rolls
+  // over to March 2 instead of failing, so require the parse to round-trip;
+  // year 0000 round-trips in JS but doesn't exist in Postgres.
   const date = new Date(`${value}T00:00:00Z`);
-  if (isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
+  if (value.startsWith('0000') || isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value) {
     return {
       success: false,
       error: {
