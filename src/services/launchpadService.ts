@@ -605,12 +605,27 @@ export class LaunchpadService {
   }
 
   /**
-   * Live launches across launchpad v0.6/v0.7/v0.8, served from a snapshot that
-   * is refreshed at most once per `config.cache.liveLaunchesTTL`. Concurrent
-   * requests during a refresh share one scan. A failed refresh is not cached
-   * and propagates (→ 5xx) rather than serving an empty list.
+   * Launches still accepting commitments across launchpad v0.6/v0.7/v0.8:
+   * on-chain state `live` and close time not yet passed. Launches past their
+   * close time stay `live` on-chain until someone calls closeLaunch (many
+   * never are), so they are excluded at serve time — a launch drops out the
+   * moment it closes, even within a cache window.
+   *
+   * Served from a snapshot refreshed at most once per
+   * `config.cache.liveLaunchesTTL`; concurrent requests during a refresh share
+   * one scan. A failed refresh is not cached and propagates (→ 5xx) rather
+   * than serving an empty list.
    */
   async getLiveLaunches(): Promise<LiveLaunchesSnapshot> {
+    const snapshot = await this.getLiveLaunchesSnapshot();
+    const nowSeconds = Date.now() / 1000;
+    return {
+      updatedAt: snapshot.updatedAt,
+      launches: snapshot.launches.filter((launch) => launch.closeTime > nowSeconds),
+    };
+  }
+
+  private async getLiveLaunchesSnapshot(): Promise<LiveLaunchesSnapshot> {
     if (this.liveLaunches && Date.now() - this.liveLaunches.fetchedAt < config.cache.liveLaunchesTTL) {
       return this.liveLaunches.snapshot;
     }

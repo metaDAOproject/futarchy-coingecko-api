@@ -77,6 +77,8 @@ describe('LaunchpadService.getLiveLaunches', () => {
     return svc;
   }
 
+  const STARTED = Math.floor(Date.now() / 1000) - 60 * 60;
+  const DURATION = 4 * 24 * 60 * 60;
   const liveLaunch = {
     publicKey: LAUNCH,
     account: {
@@ -84,15 +86,20 @@ describe('LaunchpadService.getLiveLaunches', () => {
       baseMint: MINT,
       quoteMint: USDC,
       minimumRaiseAmount: new BN('500000000000'),
-      unixTimestampStarted: new BN(1_760_000_000),
-      secondsForLaunch: 4 * 24 * 60 * 60,
+      unixTimestampStarted: new BN(STARTED),
+      secondsForLaunch: DURATION,
     },
   };
 
-  it('aggregates funding records for live launches only', async () => {
+  it('aggregates funding records for open live launches only', async () => {
     const completed = { ...liveLaunch, account: { ...liveLaunch.account, state: { complete: {} } } };
+    // Still `live` on-chain, but its close time passed and nobody called closeLaunch.
+    const pastClose = {
+      ...liveLaunch,
+      account: { ...liveLaunch.account, unixTimestampStarted: new BN(STARTED - 2 * DURATION) },
+    };
     const svc = serviceWith({
-      v07: fakeProgram([liveLaunch, completed], [
+      v07: fakeProgram([liveLaunch, completed, pastClose], [
         { account: { committedAmount: new BN('1500000') } },
         { account: { committedAmount: new BN('250000000') } },
         { account: { committedAmount: new BN(0) } },
@@ -112,7 +119,7 @@ describe('LaunchpadService.getLiveLaunches', () => {
       totalCommittedRaw: '251500000',
       minimumRaise: '500000',
       minimumRaiseRaw: '500000000000',
-      closeTime: 1_760_000_000 + 4 * 24 * 60 * 60,
+      closeTime: STARTED + DURATION,
     }]);
   });
 
@@ -123,7 +130,8 @@ describe('LaunchpadService.getLiveLaunches', () => {
     const first = await svc.getLiveLaunches();
     const second = await svc.getLiveLaunches();
 
-    expect(second).toBe(first);
+    expect(second).toEqual(first);
+    expect(first.launches).toHaveLength(1);
     expect(calls.count).toBe(1);
   });
 

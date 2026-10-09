@@ -303,8 +303,8 @@ Returns circulating supply — total minus team performance package.
 
 #### GET `/api/launches/live`
 
-Launches currently in the on-chain `live` state across launchpad v0.6, v0.7 and
-v0.8, read directly from Solana and cached for `CACHE_LIVE_LAUNCHES_TTL`
+Launches still accepting commitments across launchpad v0.6, v0.7 and v0.8 —
+on-chain state `live` with a close time in the future — read directly from Solana and cached for `CACHE_LIVE_LAUNCHES_TTL`
 (default 5 minutes). RPC failures return 5xx, never an empty list.
 
 ```json
@@ -332,8 +332,9 @@ v0.8, read directly from Solana and cached for `CACHE_LIVE_LAUNCHES_TTL`
 - `committerCount` / `totalCommitted` — count and sum of the launch's funding
   records with a non-zero `committedAmount` (one record per funder).
 - `minimumRaise` — the launch's on-chain `minimumRaiseAmount`.
-- `closeTime` — unix seconds, `unixTimestampStarted + secondsForLaunch`. A launch
-  stays `live` past this time until someone calls `closeLaunch`.
+- `closeTime` — unix seconds, `unixTimestampStarted + secondsForLaunch`. Launches
+  past this time stay `live` on-chain until someone calls `closeLaunch` (many
+  never are); they are excluded at request time, even within a cache window.
 
 ---
 

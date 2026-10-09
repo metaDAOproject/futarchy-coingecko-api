@@ -17,7 +17,7 @@ export function createRootRouter(_services: ServiceGetters): Router {
         supply: '/api/supply/:mintAddress - Returns complete supply breakdown with allocation details',
         supply_total: '/api/supply/:mintAddress/total - Returns total supply only',
         supply_circulating: '/api/supply/:mintAddress/circulating - Returns circulating supply (excludes team performance package)',
-        live_launches: '/api/launches/live - Live launchpad raises: committer count, committed total, minimum raise, close time (cached 5 min)',
+        live_launches: '/api/launches/live - Open launchpad raises: committer count, committed total, minimum raise, close time (cached 5 min)',
         health: '/health',
         health_detailed: '/api/health - Comprehensive health with app DB and served ETL contract checks',
       },
