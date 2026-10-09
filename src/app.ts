@@ -5,6 +5,7 @@ import { errorHandler, asyncHandler, AppError } from './middleware/errorHandler.
 import { metricsService } from './services/metricsService.js';
 import { config } from './config.js';
 import { createRoutes } from './routes/index.js';
+import { createProbeRouter } from './routes/health.js';
 import { createServiceGetters, type Services } from './routes/types.js';
 
 export type { Services } from './routes/types.js';
@@ -121,6 +122,9 @@ export function createApp(options: AppOptions): Application {
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
     next();
   });
+
+  // Container probes BEFORE metrics and the rate limiter (see createProbeRouter).
+  app.use(createProbeRouter(serviceGetters));
 
   // Metrics BEFORE the rate limiter so 429/401 responses are recorded too.
   app.use(createMetricsMiddleware());

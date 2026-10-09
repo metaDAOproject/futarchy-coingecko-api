@@ -9,6 +9,7 @@ import type { LaunchpadService } from '../../src/services/launchpadService.js';
 export function createMockExternalDatabaseService(): ExternalDatabaseService {
   return {
     isAvailable: () => true,
+    ping: async () => {},
     getSpotRolling24hMetrics: async () => new Map(),
     getDailyMeteoraVolumes: async () => [],
     getFutarchyAmmDailyActivity: async () => [],
