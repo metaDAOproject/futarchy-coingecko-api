@@ -6,6 +6,28 @@ A multi-aggregator DEX API for the Futarchy protocol that automatically discover
 
 **Base URL:** `https://your-api-domain.com`
 
+### Versioning
+
+Every data endpoint is served under a version prefix: `/v1/api/tickers`,
+`/v1/cmc/summary`, `/v1/dexscreener/events`, `/v1/api/launches/live`, and so on.
+New integrations should use the versioned URLs.
+
+- **Unversioned paths** (`/api/tickers`, `/cmc/summary`, …) are a frozen alias
+  of v1, kept so existing partner integrations keep working. The paths below
+  are written unversioned; prefix them with `/v1`.
+- **Not versioned:** health, probe and metrics endpoints (`/health*`,
+  `/api/health`, `/metrics`, `/`). They are operational, not part of the API
+  contract.
+- **Breaking changes** ship as a new version (`/v2/...`). Earlier versions are
+  left unchanged.
+- **Deprecation:** a deprecated version (or the unversioned alias) answers
+  every request with `Deprecation` ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745)),
+  `Sunset` ([RFC 8594](https://www.rfc-editor.org/rfc/rfc8594)) and
+  `Link: <…>; rel="successor-version"` headers. It is removed after its sunset date.
+
+Versions and their deprecation status are configured in one place,
+`API_VERSIONS` and `UNVERSIONED_ALIAS` in `src/routes/index.ts`.
+
 ---
 
 ### CoinGecko Endpoints
@@ -454,7 +476,7 @@ src/
 │   └── heartbeat.ts              # Background self-check (served DB, freshness, contract)
 ├── config.ts                     # Environment variables & configuration
 ├── routes/
-│   ├── index.ts                  # Route registration
+│   ├── index.ts                  # Route registration + API versions (/v1, unversioned alias)
 │   ├── coingecko.ts              # GET /api/tickers
 │   ├── coinmarketcap.ts          # CoinMarketCap DEX adapter (summary/ticker/assets)
 │   ├── dexscreener.ts            # DexScreener adapter (4 endpoints)

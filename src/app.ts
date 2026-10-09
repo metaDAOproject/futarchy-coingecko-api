@@ -4,7 +4,7 @@ import { requestIdMiddleware } from './middleware/requestId.js';
 import { errorHandler, asyncHandler, AppError } from './middleware/errorHandler.js';
 import { metricsService } from './services/metricsService.js';
 import { config } from './config.js';
-import { createRoutes } from './routes/index.js';
+import { createApiRoutes, createInfraRoutes } from './routes/index.js';
 import { createProbeRouter } from './routes/health.js';
 import { createServiceGetters, type Services } from './routes/types.js';
 
@@ -130,8 +130,10 @@ export function createApp(options: AppOptions): Application {
   app.use(createMetricsMiddleware());
   app.use(createRateLimitMiddleware());
 
-  // Mount all routes
-  app.use(createRoutes(serviceGetters));
+  // Health/metrics/index are operational and unversioned; the data API is
+  // served under /v1 plus the legacy unversioned alias (see routes/index.ts).
+  app.use(createInfraRoutes(serviceGetters));
+  app.use(createApiRoutes(serviceGetters));
 
   app.use(errorHandler);
 
