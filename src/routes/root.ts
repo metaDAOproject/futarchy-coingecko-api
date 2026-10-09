@@ -11,6 +11,10 @@ export function createRootRouter(_services: ServiceGetters): Router {
       name: 'Futarchy AMM - CoinGecko API',
       version: '2.0.0',
       documentation: 'https://docs.coingecko.com/reference/exchanges-list',
+      versioning: {
+        current: 'v1',
+        description: 'Every data endpoint below is served under a version prefix (e.g. /v1/api/tickers, /v1/cmc/summary). The unversioned paths are a frozen alias of v1 kept for existing integrations. Health, probe and metrics endpoints are not versioned. A deprecated version answers with Deprecation, Sunset and Link (rel="successor-version") headers.',
+      },
       endpoints: {
         tickers: '/api/tickers - Returns all DAO tickers with pricing and volume',
         market_data: '/api/market-data - Daily market data from the served user_pool ETL',
