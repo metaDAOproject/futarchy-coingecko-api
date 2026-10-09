@@ -425,6 +425,8 @@ Create a `.env` file in the root directory (see `example.env` for reference):
 | `TRUST_PROXY_HOPS` | Reverse-proxy hops in front of the API (needed for per-IP rate limiting behind a LB) | `0` |
 | `TRUSTED_API_KEYS` | Comma-separated allowlist of trusted partner keys | — |
 | `TRUSTED_RATE_LIMIT_MAX` | Per-bucket request count per minute for trusted keys | `600` |
+| `CACHE_CONTROL_MAX_AGE` | `Cache-Control` max-age (seconds) on successful data responses | `30` |
+| `SHUTDOWN_DRAIN_MS` | On SIGTERM, report not-ready and keep serving this long before closing | `5000` |
 | `CACHE_TICKERS_TTL` | On-chain data cache TTL (ms) | `55000` |
 | `CACHE_LIVE_LAUNCHES_TTL` | `/api/launches/live` snapshot TTL (ms) | `300000` |
 | **Served indexer DB (required — the only database this API uses)** | | |
@@ -504,6 +506,22 @@ The DexScreener adapter reads **directly from the external indexer DB** (`v0_6_s
 - **Trusted partners:** 600 requests per minute per key (configurable via `TRUSTED_RATE_LIMIT_MAX`). Send the issued key in the `X-API-Key` header. Each key has its own bucket — partners do not share quota.
 - Requests sent with an `X-API-Key` header that does not match the server-side allowlist receive `401 Unauthorized` with `code: "INVALID_API_KEY"`.
 - Keys are issued out-of-band by the team. Contact us if you need elevated access.
+- Every rate-limited response carries `RateLimit-Limit`, `RateLimit-Remaining`
+  and `RateLimit-Reset` (seconds) headers; a `429` also carries `Retry-After`.
+- If requests arrive with `X-Forwarded-For` while `TRUST_PROXY_HOPS=0`, the API
+  logs a one-time warning, since every client then shares the proxy's bucket.
+
+## Caching and CORS
+
+- Successful data responses send `Cache-Control: public, max-age=30`
+  (`CACHE_CONTROL_MAX_AGE`), so a CDN or client can absorb repeat polls. Errors,
+  health, probe and metrics responses send `no-store`.
+- CORS is open for read-only use: any origin, `GET`/`OPTIONS`, and the
+  `X-API-Key` and `X-Request-Id` request headers. Preflight `OPTIONS` requests
+  are answered directly with `204` and don't count toward the rate limit.
+
+Numeric settings are validated at startup; an invalid value (e.g. `PORT=30s`)
+exits with an error instead of silently becoming `NaN`.
 
 ## Error Handling
 
@@ -517,9 +535,9 @@ The DexScreener adapter reads **directly from the external indexer DB** (`v0_6_s
 
 | Code | Description |
 |------|-------------|
-| `400` | Bad Request (missing/invalid parameters) |
+| `400` | Bad Request (missing/invalid parameters, a repeated query parameter, or a `market-data` range over 366 days / more than 100 tokens) |
 | `401` | Unauthorized (invalid `X-API-Key`) |
-| `404` | Not Found |
+| `404` | Not Found (unknown routes also answer in this JSON shape, `code: "NOT_FOUND"`) |
 | `429` | Rate limit exceeded |
 | `503` | Service unavailable (DB not connected) |
 | `500` | Internal server error |

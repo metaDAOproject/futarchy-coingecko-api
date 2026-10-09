@@ -22,6 +22,14 @@ describe('Metrics Routes', () => {
       expect(response.text).toContain('# TYPE');
     });
 
+    it('labels unmatched paths as one series, so path scans cannot grow metrics without bound', async () => {
+      await request(app).get('/wp-admin/scan-xyz-123');
+      const response = await request(app).get('/metrics');
+
+      expect(response.text).toContain('path="unmatched"');
+      expect(response.text).not.toContain('scan-xyz');
+    });
+
     it('should expose the served DB connectivity gauge', async () => {
       const response = await request(app).get('/metrics');
 

@@ -4,6 +4,7 @@ import { requestIdMiddleware } from './middleware/requestId.js';
 import { errorHandler, asyncHandler, AppError } from './middleware/errorHandler.js';
 import { metricsService } from './services/metricsService.js';
 import { config } from './config.js';
+import { logger } from './utils/logger.js';
 import { createRoutes } from './routes/index.js';
 import { createProbeRouter } from './routes/health.js';
 import { createServiceGetters, type Services } from './routes/types.js';
@@ -37,7 +38,17 @@ function createRateLimitMiddleware() {
   }, SWEEP_INTERVAL_MS);
   sweep.unref?.();
 
+  let warnedAboutProxy = false;
+
   return (req: Request, res: Response, next: NextFunction): void => {
+    // Behind a proxy with TRUST_PROXY_HOPS=0, req.ip is the proxy's address, so
+    // every anonymous client shares ONE rate-limit bucket — a handful of
+    // pollers would 429 everyone. Surface the misconfiguration once.
+    if (!warnedAboutProxy && config.server.trustProxyHops === 0 && req.headers['x-forwarded-for']) {
+      warnedAboutProxy = true;
+      logger.warn('Requests carry X-Forwarded-For but TRUST_PROXY_HOPS=0: all clients share the proxy IP rate-limit bucket. Set TRUST_PROXY_HOPS to the number of proxies in front of the API.');
+    }
+
     const apiKey = req.header('x-api-key');
     let tier: { windowMs: number; maxRequests: number };
     let bucketKey: string;
@@ -56,20 +67,26 @@ function createRateLimitMiddleware() {
     }
 
     const now = Date.now();
-    const limit = buckets.get(bucketKey);
-
+    let limit = buckets.get(bucketKey);
     if (!limit || now > limit.resetTime) {
-      buckets.set(bucketKey, { count: 1, resetTime: now + tier.windowMs });
-      next();
-      return;
+      limit = { count: 0, resetTime: now + tier.windowMs };
+      buckets.set(bucketKey, limit);
     }
 
+    // IETF RateLimit header fields, so clients can pace themselves.
+    const resetSeconds = Math.max(0, Math.ceil((limit.resetTime - now) / 1000));
+    res.setHeader('RateLimit-Limit', tier.maxRequests);
+    res.setHeader('RateLimit-Reset', resetSeconds);
+
     if (limit.count >= tier.maxRequests) {
-      res.status(429).json({ error: 'Too many requests' });
+      res.setHeader('RateLimit-Remaining', 0);
+      res.setHeader('Retry-After', resetSeconds);
+      res.status(429).json({ error: 'Too many requests', code: 'RATE_LIMITED', requestId: req.requestId });
       return;
     }
 
     limit.count++;
+    res.setHeader('RateLimit-Remaining', tier.maxRequests - limit.count);
     next();
   };
 }
@@ -87,9 +104,11 @@ function createMetricsMiddleware() {
     res.on('finish', () => {
       metricsService.decrementHttpRequestsInFlight();
       const durationSeconds = (Date.now() - startTime) / 1000;
+      // Unmatched requests (404 scans of arbitrary paths) share one label so
+      // they can't create unbounded Prometheus series.
       metricsService.recordHttpRequest(
         req.method,
-        req.path,
+        req.route ? req.originalUrl.split('?')[0]! : 'unmatched',
         res.statusCode,
         durationSeconds,
         req.clientTier ?? 'anon',
@@ -98,6 +117,61 @@ function createMetricsMiddleware() {
 
     next();
   };
+}
+
+// Operational endpoints whose responses must never be cached.
+const UNCACHEABLE_PATH = /^\/(health|metrics)(\/|$)|^\/api\/health$/;
+
+/**
+ * Response headers every public response gets: CORS (read-only, any origin),
+ * nosniff, and Cache-Control decided when the status is known — successful
+ * data GETs are cacheable for `cacheMaxAgeSeconds`, everything else (errors,
+ * health, metrics) is no-store so a CDN never pins an outage. A route can
+ * still set its own Cache-Control.
+ */
+function createResponseHeadersMiddleware() {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, X-API-Key, X-Request-Id');
+    res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id, RateLimit-Limit, RateLimit-Remaining, RateLimit-Reset, Retry-After');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const writeHead = res.writeHead;
+    res.writeHead = function (this: Response, ...args: unknown[]) {
+      if (!res.getHeader('Cache-Control')) {
+        const status = typeof args[0] === 'number' ? args[0] : res.statusCode;
+        const cacheable = req.method === 'GET' && status >= 200 && status < 300
+          && !UNCACHEABLE_PATH.test(req.originalUrl.split('?')[0]!);
+        res.setHeader('Cache-Control', cacheable
+          ? `public, max-age=${config.server.cacheMaxAgeSeconds}`
+          : 'no-store');
+      }
+      return (writeHead as (...a: unknown[]) => Response).apply(this, args);
+    } as typeof res.writeHead;
+
+    // CORS preflight: answer directly, before rate limiting.
+    if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Max-Age', '86400');
+      res.status(204).end();
+      return;
+    }
+    next();
+  };
+}
+
+/**
+ * Every endpoint takes each query parameter at most once. A repeated one
+ * (`?id=a&id=b`) parses to an array, which the string-typed handlers would
+ * otherwise turn into a 500 or a confusing lookup.
+ */
+function rejectRepeatedQueryParams(req: Request, _res: Response, next: NextFunction): void {
+  for (const [key, value] of Object.entries(req.query)) {
+    if (typeof value !== 'string') {
+      throw AppError.badRequest(`Query parameter '${key}' must be given exactly once`, 'INVALID_QUERY_PARAMETER');
+    }
+  }
+  next();
 }
 
 export function createApp(options: AppOptions): Application {
@@ -112,16 +186,11 @@ export function createApp(options: AppOptions): Application {
   if (config.server.trustProxyHops > 0) {
     app.set('trust proxy', config.server.trustProxyHops);
   }
-
-  app.use(express.json());
+  app.disable('x-powered-by');
 
   app.use(requestIdMiddleware);
-
-  app.use((req: Request, res: Response, next: NextFunction) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    next();
-  });
+  app.use(createResponseHeadersMiddleware());
+  app.use(rejectRepeatedQueryParams);
 
   // Container probes BEFORE metrics and the rate limiter (see createProbeRouter).
   app.use(createProbeRouter(serviceGetters));
@@ -132,6 +201,11 @@ export function createApp(options: AppOptions): Application {
 
   // Mount all routes
   app.use(createRoutes(serviceGetters));
+
+  // JSON 404 (Express's default is an HTML page) in the same shape as errors.
+  app.use((req: Request, res: Response) => {
+    res.status(404).json({ error: 'Not found', code: 'NOT_FOUND', requestId: req.requestId });
+  });
 
   app.use(errorHandler);
 

@@ -22,6 +22,13 @@ const READINESS_DB_TIMEOUT_MS = 2_000;
  * - liveness:  200 whenever the event loop can answer. No dependency checks,
  *              so a DB or RPC outage never triggers a restart loop.
  */
+let draining = false;
+
+/** Called on SIGTERM: readiness reports 503 so the load balancer drains this container. */
+export function startDraining(): void {
+  draining = true;
+}
+
 export function createProbeRouter(services: ServiceGetters): Router {
   const router = Router();
   const { getExternalDatabaseService } = services;
@@ -35,6 +42,10 @@ export function createProbeRouter(services: ServiceGetters): Router {
   });
 
   router.get('/health/ready', async (req: Request, res: Response) => {
+    if (draining) {
+      res.status(503).json({ status: 'draining', message: 'Shutting down' });
+      return;
+    }
     const externalDatabaseService = getExternalDatabaseService();
     try {
       if (!externalDatabaseService) {
