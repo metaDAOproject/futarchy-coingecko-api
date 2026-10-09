@@ -2,6 +2,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { getMint } from '@solana/spl-token';
 import { config } from '../config.js';
 import { createSolanaConnection } from '../utils/solanaConnection.js';
+import { TtlCache } from '../utils/ttlCache.js';
 import BN from 'bn.js';
 import { retry, isTransientError, createRetryLogger } from '../utils/resilience.js';
 import { logger } from '../utils/logger.js';
@@ -89,23 +90,24 @@ export interface TokenAllocationInput {
 
 export class SolanaService {
   private connection: Connection;
-  private cache: Map<string, { data: any; timestamp: number }>;
+  // Keyed by caller-supplied mints, so bounded.
+  private cache = new TtlCache(10_000);
 
   constructor() {
     this.connection = createSolanaConnection();
-    this.cache = new Map();
   }
 
-  private getCached<T>(key: string, ttl: number): T | null {
-    const cached = this.cache.get(key);
-    if (cached && Date.now() - cached.timestamp < ttl) {
-      return cached.data as T;
-    }
-    return null;
-  }
-
-  private setCache(key: string, data: any): void {
-    this.cache.set(key, { data, timestamp: Date.now() });
+  /**
+   * The mint's supply and decimals, cached per mint for `tickersTTL`.
+   * Concurrent requests for one mint share a single RPC read. Supply figures
+   * are derived from this on every call (cheap arithmetic), so nothing is
+   * cached under keys that change whenever balances move.
+   */
+  private getMintInfo(mintAddress: string): Promise<{ supply: bigint; decimals: number }> {
+    return this.cache.getOrLoad(`mint_${mintAddress}`, config.cache.tickersTTL, async () => {
+      const mint = await this.withRetry(() => getMint(this.connection, new PublicKey(mintAddress)));
+      return { supply: mint.supply, decimals: mint.decimals };
+    });
   }
 
   /**
@@ -139,21 +141,13 @@ export class SolanaService {
    * @returns Promise<string> - The total supply with proper decimals
    */
   async getTotalSupply(mintAddress: string): Promise<string> {
-    const cacheKey = `total_supply_${mintAddress}`;
-    const cached = this.getCached<string>(cacheKey, config.cache.tickersTTL);
-    if (cached !== null) return cached;
-
     try {
-      const mintPubkey = new PublicKey(mintAddress);
-      const mintInfo = await this.withRetry(() => getMint(this.connection, mintPubkey));
+      const mintInfo = await this.getMintInfo(mintAddress);
       const supply = Number(mintInfo.supply);
       const decimals = mintInfo.decimals;
 
       const totalSupply = supply / Math.pow(10, decimals);
-      const result = totalSupply.toString();
-
-      this.setCache(cacheKey, result);
-      return result;
+      return totalSupply.toString();
     } catch (error) {
       logger.error(`Error fetching total supply for ${mintAddress}:`, error);
       throw new Error(`Failed to fetch total supply for token: ${mintAddress}`);
@@ -167,17 +161,8 @@ export class SolanaService {
    * @returns Promise<TokenSupplyInfo> - Complete supply information with allocation details
    */
   async getSupplyInfo(mintAddress: string, allocation?: TokenAllocationInput): Promise<TokenSupplyInfo> {
-    const additionalAmount = allocation?.additionalTokenAllocation?.amount || new BN(0);
-    const daoTreasuryAmount = allocation?.daoTreasuryTokens?.amount || new BN(0);
-    const cacheKey = allocation 
-      ? `supply_info_${mintAddress}_${allocation.teamPerformancePackage.amount}_${allocation.futarchyAmmLiquidity.amount}_${allocation.meteoraLpLiquidity.amount}_${additionalAmount}_${daoTreasuryAmount}`
-      : `supply_info_${mintAddress}_none`;
-    const cached = this.getCached<TokenSupplyInfo>(cacheKey, config.cache.tickersTTL);
-    if (cached !== null) return cached;
-
     try {
-      const mintPubkey = new PublicKey(mintAddress);
-      const mintInfo = await this.withRetry(() => getMint(this.connection, mintPubkey));
+      const mintInfo = await this.getMintInfo(mintAddress);
       const rawSupply = mintInfo.supply.toString();
       const totalSupplyBN = new BN(mintInfo.supply.toString());
       const decimals = mintInfo.decimals;
@@ -277,7 +262,6 @@ export class SolanaService {
         allocation: allocationDetails,
       };
 
-      this.setCache(cacheKey, result);
       return result;
     } catch (error) {
       logger.error(`Error fetching supply info for ${mintAddress}:`, error);

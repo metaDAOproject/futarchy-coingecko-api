@@ -14,6 +14,7 @@ import BN from 'bn.js';
 import { retry, isTransientError, createRetryLogger } from '../utils/resilience.js';
 import { logger } from '../utils/logger.js';
 import { createSolanaConnection } from '../utils/solanaConnection.js';
+import { TtlCache } from '../utils/ttlCache.js';
 import { metricsService } from './metricsService.js';
 
 export interface PoolData {
@@ -130,7 +131,8 @@ function extractSpotPool(dao: any): PoolData | null {
 export class FutarchyService {
   private connection: Connection;
   private client: FutarchyClient;
-  private cache: Map<string, { data: any; timestamp: number }>;
+  // Keyed by mints, some caller-supplied (DexScreener /asset), so bounded.
+  private cache = new TtlCache(10_000);
   private rateLimitErrors: number = 0;
   private allDaos: { data: DaoTickerData[]; fetchedAt: number } | null = null;
   private allDaosInFlight: Promise<DaoTickerData[]> | null = null;
@@ -150,7 +152,6 @@ export class FutarchyService {
       commitment: 'confirmed',
     });
     this.client = FutarchyClient.createClient({ provider });
-    this.cache = new Map();
   }
 
   private isRateLimitError(error: any): boolean {
@@ -189,15 +190,11 @@ export class FutarchyService {
   }
 
   private getCached<T>(key: string, ttl: number): T | null {
-    const cached = this.cache.get(key);
-    if (cached && Date.now() - cached.timestamp < ttl) {
-      return cached.data as T;
-    }
-    return null;
+    return this.cache.get<T>(key, ttl) ?? null;
   }
 
-  private setCache(key: string, data: any): void {
-    this.cache.set(key, { data, timestamp: Date.now() });
+  private setCache(key: string, data: unknown): void {
+    this.cache.set(key, data);
   }
 
   // Decimals never change and token names rarely do; cache them far longer

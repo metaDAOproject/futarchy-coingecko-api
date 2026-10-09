@@ -9,7 +9,8 @@
  */
 
 import { describe, it, expect, setSystemTime, afterEach } from 'bun:test';
-import { PublicKey } from '@solana/web3.js';
+import { Keypair, PublicKey } from '@solana/web3.js';
+import { ACCOUNT_SIZE, AccountLayout, TOKEN_PROGRAM_ID, getAssociatedTokenAddressSync } from '@solana/spl-token';
 import BN from 'bn.js';
 import { LaunchpadService } from '../../src/services/launchpadService.js';
 import { config } from '../../src/config.js';
@@ -173,5 +174,86 @@ describe('LaunchpadService.getLiveLaunches', () => {
     await expect(svc.getLiveLaunches()).rejects.toThrow('RPC connection refused');
     fail = false;
     expect((await svc.getLiveLaunches()).launches).toEqual([]);
+  });
+});
+
+describe('LaunchpadService batched allocation reads', () => {
+  const USDC = new PublicKey('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v');
+  const DAO = Keypair.generate().publicKey;
+  const AMM_VAULT = Keypair.generate().publicKey;
+  const SQUADS_VAULT = Keypair.generate().publicKey;
+  const LAUNCH = new PublicKey('5FPGRzY9ArJFwY2Hp2y2eqMzVewyWCBox7esmpuZfCvE');
+
+  const tokenAccount = (owner: PublicKey, amount: bigint) => {
+    const data = Buffer.alloc(ACCOUNT_SIZE);
+    AccountLayout.encode({
+      mint: MINT, owner, amount, delegateOption: 0, delegate: PublicKey.default, state: 1,
+      isNativeOption: 0, isNative: 0n, delegatedAmount: 0n, closeAuthorityOption: 0, closeAuthority: PublicKey.default,
+    }, data);
+    return { data, owner: TOKEN_PROGRAM_ID, lamports: 1, executable: false };
+  };
+
+  function completedLaunchService(balances: (keys: PublicKey[]) => Promise<unknown[]>) {
+    const svc = new LaunchpadService();
+    const calls = { daoFetches: 0, balanceReads: 0 };
+    (svc as any).getLaunchByBaseMint = async () => ({
+      launchAddress: LAUNCH, baseMint: MINT, version: 'v0.7', dao: DAO,
+      performancePackageTokenAmount: new BN(0),
+    });
+    (svc as any).futarchyClient = {
+      fetchDao: async () => { calls.daoFetches++; return { quoteMint: USDC, amm: { ammBaseVault: AMM_VAULT }, squadsMultisigVault: SQUADS_VAULT }; },
+    };
+    (svc as any).connection = {
+      getMultipleAccountsInfo: async (keys: PublicKey[]) => { calls.balanceReads++; return balances(keys); },
+    };
+    return { svc, calls };
+  }
+
+  it('reads every balance in one call, fetches the DAO once, and treats absent accounts as 0', async () => {
+    const treasuryAta = getAssociatedTokenAddressSync(MINT, SQUADS_VAULT, true);
+    const { svc, calls } = completedLaunchService(async (keys) => keys.map((key) => {
+      if (key.equals(AMM_VAULT)) return tokenAccount(AMM_VAULT, 5_000n);
+      if (key.equals(treasuryAta)) return tokenAccount(SQUADS_VAULT, 7_000n);
+      return null; // performance package and Meteora vault absent
+    }));
+
+    const breakdown = await svc.getTokenAllocationBreakdown(MINT);
+
+    expect(calls).toEqual({ daoFetches: 1, balanceReads: 1 });
+    expect(breakdown.futarchyAmmLiquidity.amount.toString()).toBe('5000');
+    expect(breakdown.futarchyAmmLiquidity.vaultAddress?.equals(AMM_VAULT)).toBe(true);
+    expect(breakdown.daoTreasuryTokens.amount.toString()).toBe('7000');
+    expect(breakdown.daoTreasuryTokens.vaultAddress?.equals(SQUADS_VAULT)).toBe(true);
+    // Absent accounts: 0, and (as before) no pool/vault address reported for them.
+    expect(breakdown.teamPerformancePackage.amount.isZero()).toBe(true);
+    expect(breakdown.teamPerformancePackage.address).toBeDefined();
+    expect(breakdown.meteoraLpLiquidity).toEqual({ amount: new BN(0) });
+    expect(breakdown.totalNonCirculating.toString()).toBe('7000');
+  });
+
+  it('rejects instead of reading zeros when the balance read fails', async () => {
+    const { svc } = completedLaunchService(async () => { throw new Error('RPC connection refused'); });
+
+    await expect(svc.getTokenAllocationBreakdown(MINT)).rejects.toThrow('RPC connection refused');
+  });
+
+  it('shares one load between concurrent requests for a mint', async () => {
+    const { svc, calls } = completedLaunchService(async (keys) => keys.map(() => null));
+
+    await Promise.all([1, 2, 3, 4, 5].map(() => svc.getTokenAllocationBreakdown(MINT)));
+
+    expect(calls).toEqual({ daoFetches: 1, balanceReads: 1 });
+  });
+
+  it('reads both launch program versions in one call and caches "no launch"', async () => {
+    const svc = new LaunchpadService();
+    let reads = 0;
+    (svc as any).connection = {
+      getMultipleAccountsInfo: async (keys: PublicKey[]) => { reads++; expect(keys).toHaveLength(2); return [null, null]; },
+    };
+
+    expect(await svc.getLaunchByBaseMint(MINT)).toBeNull();
+    expect(await svc.getLaunchByBaseMint(MINT)).toBeNull();
+    expect(reads).toBe(1);
   });
 });

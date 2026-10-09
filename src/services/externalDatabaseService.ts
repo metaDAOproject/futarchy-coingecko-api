@@ -706,6 +706,7 @@ export class ExternalDatabaseService {
       max: 5,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
+      statement_timeout: config.externalDatabase.statementTimeoutMs,
     });
 
     this.pool.on('error', (err: Error) => {
