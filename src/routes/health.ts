@@ -2,7 +2,6 @@ import { Router, type Request, type Response } from 'express';
 import { logger } from '../utils/logger.js';
 import type { ServiceGetters } from './types.js';
 import type { ServedDataFreshness } from '../services/externalDatabaseService.js';
-import { withTimeout } from '../utils/resilience.js';
 
 // Below the recommended 3s probe timeout, so a hung DB is reported as a 503
 // by the API rather than as a probe timeout.
@@ -38,13 +37,10 @@ export function createProbeRouter(services: ServiceGetters): Router {
   router.get('/health/ready', async (req: Request, res: Response) => {
     const externalDatabaseService = getExternalDatabaseService();
     try {
-      if (!externalDatabaseService?.isAvailable()) {
-        throw new Error('Served database not connected');
+      if (!externalDatabaseService) {
+        throw new Error('Served database not configured');
       }
-      await withTimeout(externalDatabaseService.query('SELECT 1'), {
-        timeoutMs: READINESS_DB_TIMEOUT_MS,
-        timeoutMessage: `Served database ping timed out after ${READINESS_DB_TIMEOUT_MS}ms`,
-      });
+      await externalDatabaseService.ping(READINESS_DB_TIMEOUT_MS);
       res.json({ status: 'ok' });
     } catch (error) {
       logger.warn('Readiness probe failed', {

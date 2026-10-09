@@ -42,6 +42,8 @@ export class ExternalDatabaseService {
   private isConnected: boolean = false;
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private consecutiveFailures: number = 0;
+  private pingWork: Promise<void> | null = null;
+  private pingClient: pg.PoolClient | null = null;
 
   private static readonly HEALTH_CHECK_INTERVAL_MS = 60_000;
   private static readonly MAX_FAILURES_BEFORE_RECONNECT = 3;
@@ -561,6 +563,62 @@ export class ExternalDatabaseService {
         missing: ['contract-check-query'],
       };
     }
+  }
+
+  /**
+   * `SELECT 1` with a hard deadline, for the readiness probe. Rejects if the
+   * DB is disconnected, errors, or doesn't answer within `timeoutMs`.
+   *
+   * The ping's work is bounded, not just its wait, so a hung DB can't make
+   * probes eat the shared 5-connection pool that API reads need:
+   *  - at most one ping runs at a time; later callers wait on it with their
+   *    own deadline instead of starting another connect/query;
+   *  - a ping that times out mid-query destroys its connection. A ping stuck
+   *    connecting is bounded by the pool's connectionTimeoutMillis.
+   */
+  ping(timeoutMs: number): Promise<void> {
+    const pool = this.pool;
+    if (!pool || !this.isConnected) {
+      return Promise.reject(new Error('External database not connected'));
+    }
+    if (!this.pingWork) {
+      this.pingWork = this.runPing(pool).finally(() => {
+        this.pingWork = null;
+      });
+    }
+    const work = this.pingWork;
+
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const client = this.pingClient;
+        if (client) {
+          this.pingClient = null;
+          client.release(true); // destroy: aborts the hung query, frees the slot
+        }
+        reject(new Error(`Served database ping timed out after ${timeoutMs}ms`));
+      }, timeoutMs);
+      work.then(
+        () => { clearTimeout(timer); resolve(); },
+        (error) => { clearTimeout(timer); reject(error); }
+      );
+    });
+  }
+
+  private async runPing(pool: pg.Pool): Promise<void> {
+    const client = await pool.connect();
+    this.pingClient = client;
+    let error: unknown;
+    try {
+      await client.query('SELECT 1');
+    } catch (e) {
+      error = e ?? new Error('Served database ping failed');
+    }
+    // Skip if a timeout already destroyed this client.
+    if (this.pingClient === client) {
+      this.pingClient = null;
+      client.release(error !== undefined); // destroy a connection that failed
+    }
+    if (error !== undefined) throw error;
   }
 
   async close(): Promise<void> {

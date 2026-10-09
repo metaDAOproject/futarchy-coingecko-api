@@ -96,10 +96,11 @@ describe('Health Routes', () => {
     const disconnectedDb = () => ({
       ...createMockExternalDatabaseService(),
       isAvailable: () => false,
+      ping: async () => { throw new Error('External database not connected'); },
     }) as unknown as ExternalDatabaseService;
-    const dbWithPing = (query: () => Promise<unknown>) => ({
+    const dbWithPing = (ping: () => Promise<void>) => ({
       ...createMockExternalDatabaseService(),
-      query,
+      ping,
     }) as unknown as ExternalDatabaseService;
 
     it('liveness stays 200 when the served DB is down (no restart loop on outages)', async () => {
@@ -117,7 +118,7 @@ describe('Health Routes', () => {
 
     it('readiness is 200 when the served DB answers a ping', async () => {
       const res = await request(createTestApp({
-        externalDatabaseService: dbWithPing(async () => ({ rows: [] })),
+        externalDatabaseService: dbWithPing(async () => {}),
       })).get('/health/ready');
 
       expect(res.status).toBe(200);
