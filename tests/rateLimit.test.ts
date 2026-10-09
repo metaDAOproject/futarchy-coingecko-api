@@ -30,6 +30,16 @@ describe('Rate limiting', () => {
       expect(overflow.status).toBe(429);
       expect(overflow.body).toEqual({ error: 'Too many requests' });
     });
+
+    it('never rate-limits the container probes', async () => {
+      config.server.rateLimit.maxRequests = 1;
+      const app = createApp({ services: createTestServices() });
+
+      for (let i = 0; i < 5; i++) {
+        expect((await request(app).get('/health/live')).status).toBe(200);
+        expect((await request(app).get('/health/startup')).status).toBe(200);
+      }
+    });
   });
 
   describe('trusted X-API-Key', () => {

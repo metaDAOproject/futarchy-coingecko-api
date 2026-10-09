@@ -91,4 +91,46 @@ describe('Health Routes', () => {
       expect(response.body.message).toContain('freshness');
     });
   });
+
+  describe('container probes', () => {
+    const disconnectedDb = () => ({
+      ...createMockExternalDatabaseService(),
+      isAvailable: () => false,
+    }) as unknown as ExternalDatabaseService;
+    const dbWithPing = (query: () => Promise<unknown>) => ({
+      ...createMockExternalDatabaseService(),
+      query,
+    }) as unknown as ExternalDatabaseService;
+
+    it('liveness stays 200 when the served DB is down (no restart loop on outages)', async () => {
+      const res = await request(createTestApp({ externalDatabaseService: disconnectedDb() })).get('/health/live');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('startup is 200 once the served DB connected and 503 until then', async () => {
+      expect((await request(app).get('/health/startup')).status).toBe(200);
+
+      const res = await request(createTestApp({ externalDatabaseService: disconnectedDb() })).get('/health/startup');
+      expect(res.status).toBe(503);
+    });
+
+    it('readiness is 200 when the served DB answers a ping', async () => {
+      const res = await request(createTestApp({
+        externalDatabaseService: dbWithPing(async () => ({ rows: [] })),
+      })).get('/health/ready');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('readiness is 503 when the served DB ping fails or the DB is disconnected', async () => {
+      const failing = await request(createTestApp({
+        externalDatabaseService: dbWithPing(async () => { throw new Error('connection terminated'); }),
+      })).get('/health/ready');
+      const disconnected = await request(createTestApp({ externalDatabaseService: disconnectedDb() })).get('/health/ready');
+
+      expect(failing.status).toBe(503);
+      expect(disconnected.status).toBe(503);
+    });
+  });
 });

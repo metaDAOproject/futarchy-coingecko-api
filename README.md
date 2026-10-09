@@ -346,12 +346,41 @@ on-chain state `live` with a close time in the future — read directly from Sol
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Liveness: process status and uptime (no dependency checks) |
-| `GET /api/health` | Readiness: served DB connectivity, ETL data contract, and data freshness |
+| `GET /health/startup` | Startup probe: 200 once the served DB connected at boot, else 503 |
+| `GET /health/ready` | Readiness probe: 200 while the served DB answers `SELECT 1` within 2s, else 503 |
+| `GET /health/live` | Liveness probe: 200 whenever the process can respond (no dependency checks) |
+| `GET /health` | Process status and uptime (no dependency checks) |
+| `GET /api/health` | Detailed status: served DB connectivity, ETL data contract, and data freshness |
 | `GET /metrics` | Prometheus metrics (HTTP, served-DB health gauges, heartbeat) |
 
-`/api/health` reports `status: "degraded"` (with a `message`) when the served DB
-is unreachable, the served-data contract check fails, or the freshness query fails.
+`/api/health` always returns 200 and reports `status: "degraded"` (with a
+`message`) when the served DB is unreachable, the served-data contract check
+fails, or the freshness query fails. Use it for dashboards, not probes.
+
+#### Container probes (Northflank)
+
+The `/health/{startup,ready,live}` probes skip the rate limiter and request
+metrics. Probes run inside the container and all share the 127.0.0.1 rate-limit
+bucket, and a 429 on liveness would restart a healthy container.
+
+| Probe | Path | Initial delay | Interval | Timeout | Max failures | Success threshold |
+|-------|------|---------------|----------|---------|--------------|-------------------|
+| Startup | `/health/startup` | 2s | 5s | 3s | 12 (~60s to start) | 1 |
+| Readiness | `/health/ready` | 1s | 10s | 3s | 3 (~30s to leave the LB) | 1 |
+| Liveness | `/health/live` | 1s | 15s | 3s | 4 (~60s unresponsive → restart) | 1 |
+
+All three use HTTP on port `3000` (`PORT`). Why these values:
+
+- **Startup.** Boot usually takes 1–3s. The initial DB connect can take up to its
+  10s connection timeout. If the DB never connects, the startup probe fails and
+  the container restarts. Without that, the container would never recover,
+  because the DB reconnect loop only starts after a successful first connect.
+- **Readiness.** The probe gives up on the DB ping at 2s, under the 3s probe
+  timeout, so a hung DB returns a clean 503. Three failures in a row tolerate a
+  single blip.
+- **Liveness.** It has no dependencies, so a DB or RPC outage never causes
+  restart loops. The settings are lenient because a restart costs more than a
+  brief event-loop stall.
 
 **Heartbeat**: a background self-check runs every `HEARTBEAT_INTERVAL_MS` (default
 1 min). It verifies served-DB connectivity, alerts when the newest swap is older
