@@ -3,9 +3,6 @@ import { parseDateParam, parseCommaSeparatedList } from '../utils/validation.js'
 import { logger } from '../utils/logger.js';
 import type { ServiceGetters } from './types.js';
 
-const MAX_RANGE_DAYS = 366;
-const MAX_TOKENS = 100;
-
 export function createMarketRouter(services: ServiceGetters): Router {
   const router = Router();
   const { getExternalDatabaseService } = services;
@@ -28,16 +25,7 @@ export function createMarketRouter(services: ServiceGetters): Router {
       return res.status(400).json(endDateResult.error);
     }
 
-    // Bound the work a single public request can ask for.
-    const rangeDays = (Date.parse(endDateResult.value!) - Date.parse(startDateResult.value!)) / 86_400_000;
-    if (rangeDays < 0) {
-      return res.status(400).json({ error: 'Invalid date range', message: 'endDate must be on or after startDate', field: 'endDate' });
-    }
-    if (rangeDays > MAX_RANGE_DAYS) {
-      return res.status(400).json({ error: 'Date range too large', message: `At most ${MAX_RANGE_DAYS} days per request`, field: 'endDate' });
-    }
-
-    const tokensResult = parseCommaSeparatedList(req.query.tokens as string, 'tokens', { maxLength: MAX_TOKENS });
+    const tokensResult = parseCommaSeparatedList(req.query.tokens as string, 'tokens');
     if (!tokensResult.success) {
       return res.status(400).json(tokensResult.error);
     }

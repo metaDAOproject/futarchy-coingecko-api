@@ -535,7 +535,7 @@ exits with an error instead of silently becoming `NaN`.
 
 | Code | Description |
 |------|-------------|
-| `400` | Bad Request (missing/invalid parameters, a repeated query parameter, or a `market-data` range over 366 days / more than 100 tokens) |
+| `400` | Bad Request (missing/invalid parameters, or a repeated query parameter) |
 | `401` | Unauthorized (invalid `X-API-Key`) |
 | `404` | Not Found (unknown routes also answer in this JSON shape, `code: "NOT_FOUND"`) |
 | `429` | Rate limit exceeded |

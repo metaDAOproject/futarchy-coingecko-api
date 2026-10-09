@@ -56,19 +56,6 @@ describe('Market Routes', () => {
       expect(response.body.error).toBe('Invalid date format');
     });
 
-    it('returns 400 for a reversed or longer-than-a-year date range', async () => {
-      const reversed = await request(app)
-        .get('/api/market-data')
-        .query({ startDate: '2024-02-01', endDate: '2024-01-01' });
-      const tooLong = await request(app)
-        .get('/api/market-data')
-        .query({ startDate: '2022-01-01', endDate: '2024-01-01' });
-
-      expect(reversed.status).toBe(400);
-      expect(tooLong.status).toBe(400);
-      expect(tooLong.body.error).toBe('Date range too large');
-    });
-
     it('returns 503 when the served DB is unavailable', async () => {
       const downApp = createTestApp({
         externalDatabaseService: { isAvailable: () => false } as unknown as ExternalDatabaseService,
